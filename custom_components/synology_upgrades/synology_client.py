@@ -197,8 +197,35 @@ class SynologyClient:
         )
 
     def upgrade_package(self, package_id: str) -> None:
-        """Trigger a package upgrade."""
-        self._package.easy_install(package_id, volume_path="/volume1")
+        """Trigger a package upgrade.
+
+        Downloads the new version, waits for completion, then upgrades.
+        The synology-api easy_install rejects already-installed packages,
+        so we replicate the download+upgrade flow manually.
+        """
+        import time
+
+        response = self._package.list_installable()
+        installable = response.get("data", {}).get("packages", [])
+        pkg_info = next((p for p in installable if p.get("id") == package_id), None)
+        if pkg_info is None:
+            raise RuntimeError(f"Package {package_id} not found in installable list")
+
+        response = self._package.download_package(
+            url=pkg_info.get("link", ""),
+            package_id=package_id,
+            checksum=pkg_info.get("md5", ""),
+            filesize=pkg_info.get("size", 0),
+        )
+        task_id = response.get("data", {}).get("taskid", "")
+
+        for _ in range(120):
+            status = self._package.get_dowload_package_status(task_id=task_id)
+            if status.get("data", {}).get("finished"):
+                break
+            time.sleep(1)
+
+        self._package.upgrade_package(task_id=task_id)
 
     def trigger_security_scan(self) -> None:
         """Trigger a Security Advisor scan."""
