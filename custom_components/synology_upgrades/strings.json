@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Synology NAS",
+        "description": "Enter your NAS connection details. The account must have admin privileges.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password",
+          "ssl": "Use HTTPS",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This Synology NAS is already configured."
+    },
+    "error": {
+      "authentication_error": "Invalid credentials. Ensure the account has admin privileges.",
+      "cannot_connect": "Cannot connect to the NAS. Check the host, port, and SSL settings.",
+      "unknown": "An unexpected error occurred."
+    }
+  }
+}
