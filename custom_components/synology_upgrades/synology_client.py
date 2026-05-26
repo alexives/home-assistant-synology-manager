@@ -199,9 +199,9 @@ class SynologyClient:
     def upgrade_package(self, package_id: str) -> None:
         """Trigger a package upgrade.
 
-        Downloads the new version, waits for completion, then upgrades.
-        The synology-api easy_install rejects already-installed packages,
-        so we replicate the download+upgrade flow manually.
+        Calling download_package for an already-installed package
+        auto-triggers the upgrade on the NAS. We just need to download
+        and wait for completion.
         """
         import time
 
@@ -211,6 +211,7 @@ class SynologyClient:
         if pkg_info is None:
             raise RuntimeError(f"Package {package_id} not found in installable list")
 
+        _LOGGER.debug("Upgrading package %s from %s", package_id, pkg_info.get("link", ""))
         response = self._package.download_package(
             url=pkg_info.get("link", ""),
             package_id=package_id,
@@ -219,13 +220,12 @@ class SynologyClient:
         )
         task_id = response.get("data", {}).get("taskid", "")
 
-        for _ in range(120):
+        for _ in range(300):
             status = self._package.get_dowload_package_status(task_id=task_id)
-            if status.get("data", {}).get("finished"):
+            data = status.get("data", {})
+            if data.get("finished") and not data.get("installing"):
                 break
             time.sleep(1)
-
-        self._package.upgrade_package(task_id=task_id)
 
     def trigger_security_scan(self) -> None:
         """Trigger a Security Advisor scan."""
