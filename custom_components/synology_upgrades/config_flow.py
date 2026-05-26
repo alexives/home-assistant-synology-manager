@@ -69,6 +69,44 @@ class SynologyUpgradesConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    async def async_step_reauth(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle re-authentication after credentials become invalid."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle re-authentication confirmation."""
+        errors: dict[str, str] | None = None
+
+        if user_input is not None:
+            reauth_entry = self._get_reauth_entry()
+            data = {**reauth_entry.data, **user_input}
+            try:
+                await validate_input(self.hass, data)
+            except InvalidAuth:
+                errors = {"base": "authentication_error"}
+            except CannotConnect:
+                errors = {"base": "cannot_connect"}
+            except Exception:
+                _LOGGER.exception("Unexpected exception during reauth validation")
+                errors = {"base": "unknown"}
+            else:
+                return self.async_update_reload_and_abort(reauth_entry, data=data)
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+        )
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
