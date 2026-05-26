@@ -7,7 +7,6 @@ import pytest
 from custom_components.synology_upgrades.synology_client import (
     SynologyAuthenticationError,
     SynologyClient,
-    SynologyConnectionError,
 )
 
 
@@ -100,8 +99,12 @@ class TestDsmUpdate:
         mock_sysinfo.return_value = mock_instance
 
         client = SynologyClient(
-            host="nas.local", port=5001, username="admin",
-            password="secret", secure=True, verify_ssl=False,
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
         )
         client.connect()
         result = client.get_dsm_update()
@@ -127,8 +130,12 @@ class TestDsmUpdate:
         mock_sysinfo.return_value = mock_instance
 
         client = SynologyClient(
-            host="nas.local", port=5001, username="admin",
-            password="secret", secure=True, verify_ssl=False,
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
         )
         client.connect()
         result = client.get_dsm_update()
@@ -171,8 +178,12 @@ class TestPackages:
         mock_package.return_value = mock_pkg
 
         client = SynologyClient(
-            host="nas.local", port=5001, username="admin",
-            password="secret", secure=True, verify_ssl=False,
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
         )
         client.connect()
         packages = client.get_packages()
@@ -216,8 +227,12 @@ class TestContainers:
         mock_docker.return_value = mock_docker_inst
 
         client = SynologyClient(
-            host="nas.local", port=5001, username="admin",
-            password="secret", secure=True, verify_ssl=False,
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
         )
         client.connect()
         containers = client.get_containers()
@@ -235,8 +250,12 @@ class TestContainers:
         mock_docker.side_effect = Exception("Docker not installed")
 
         client = SynologyClient(
-            host="nas.local", port=5001, username="admin",
-            password="secret", secure=True, verify_ssl=False,
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
         )
         client.connect()
         containers = client.get_containers()

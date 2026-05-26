@@ -48,8 +48,10 @@ async def test_setup_entry(hass: HomeAssistant) -> None:
 
     mock_client = MagicMock()
     mock_client.get_dsm_update.return_value = DsmUpdateInfo(
-        installed_version="7.2.1", latest_version=None,
-        update_available=False, release_notes=None,
+        installed_version="7.2.1",
+        latest_version=None,
+        update_available=False,
+        release_notes=None,
     )
     mock_client.get_packages.return_value = []
     mock_client.get_containers.return_value = []
@@ -114,8 +116,10 @@ async def test_unload_entry(hass: HomeAssistant) -> None:
 
     mock_client = MagicMock()
     mock_client.get_dsm_update.return_value = DsmUpdateInfo(
-        installed_version="7.2.1", latest_version=None,
-        update_available=False, release_notes=None,
+        installed_version="7.2.1",
+        latest_version=None,
+        update_available=False,
+        release_notes=None,
     )
     mock_client.get_packages.return_value = []
     mock_client.get_containers.return_value = []

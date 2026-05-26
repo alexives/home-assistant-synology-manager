@@ -1,7 +1,6 @@
 """Tests for the Synology Upgrades coordinator."""
 
-from datetime import timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.core import HomeAssistant

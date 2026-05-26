@@ -9,8 +9,8 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 try:
-    from synology_api.core_sys_info import SysInfo
     from synology_api.core_package import Package
+    from synology_api.core_sys_info import SysInfo
     from synology_api.docker_api import Docker as DockerApi
 except ImportError:
     SysInfo = None  # type: ignore[assignment,misc]
@@ -139,9 +139,7 @@ class SynologyClient:
         installable = self._package.list_installable()
         installable_data = installable.get("data", {}).get("packages", [])
         installable_map = {
-            pkg["id"]: pkg.get("version", "")
-            for pkg in installable_data
-            if isinstance(pkg, dict)
+            pkg["id"]: pkg.get("version", "") for pkg in installable_data if isinstance(pkg, dict)
         }
 
         packages = []
@@ -153,13 +151,15 @@ class SynologyClient:
             latest_ver = installable_map.get(pkg_id)
             update_available = bool(latest_ver and latest_ver != installed_ver)
 
-            packages.append(PackageInfo(
-                package_id=pkg_id,
-                display_name=pkg.get("name", pkg_id),
-                installed_version=installed_ver,
-                latest_version=latest_ver if update_available else installed_ver,
-                update_available=update_available,
-            ))
+            packages.append(
+                PackageInfo(
+                    package_id=pkg_id,
+                    display_name=pkg.get("name", pkg_id),
+                    installed_version=installed_ver,
+                    latest_version=latest_ver if update_available else installed_ver,
+                    update_available=update_available,
+                )
+            )
         return packages
 
     def get_containers(self) -> list[ContainerInfo]:
@@ -176,14 +176,16 @@ class SynologyClient:
                 continue
             image = ctr.get("image", "")
             tag = image.split(":")[-1] if ":" in image else "latest"
-            containers.append(ContainerInfo(
-                name=ctr.get("name", ""),
-                image=image,
-                installed_version=tag,
-                latest_version=tag,
-                update_available=False,
-                status=ctr.get("status", "unknown"),
-            ))
+            containers.append(
+                ContainerInfo(
+                    name=ctr.get("name", ""),
+                    image=image,
+                    installed_version=tag,
+                    latest_version=tag,
+                    update_available=False,
+                    status=ctr.get("status", "unknown"),
+                )
+            )
         return containers
 
     def upgrade_dsm(self) -> None:

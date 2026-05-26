@@ -1,10 +1,9 @@
 """Tests for Synology Upgrades update entities."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.components.update import UpdateEntityFeature
-from homeassistant.core import HomeAssistant
 
 from custom_components.synology_upgrades.synology_client import (
     ContainerInfo,

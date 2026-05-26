@@ -12,12 +12,12 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_HOST,
+    CONF_OTP_CODE,
     CONF_PASSWORD,
     CONF_PORT,
     CONF_SSL,
     CONF_USERNAME,
     CONF_VERIFY_SSL,
-    CONF_OTP_CODE,
     DOMAIN,
 )
 from .coordinator import SynologyUpgradesCoordinator
