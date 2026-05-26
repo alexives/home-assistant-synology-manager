@@ -5,5 +5,6 @@
   "config_flow": true,
   "codeowners": ["@aives"],
   "iot_class": "local_polling",
-  "requirements": ["synology-api>=0.8.0"]
+  "requirements": ["synology-api>=0.8.0"],
+  "icon": "mdi:alpha-s-box"
 }
