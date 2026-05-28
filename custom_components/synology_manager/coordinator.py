@@ -69,14 +69,24 @@ class SynologyManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             containers = await self.hass.async_add_executor_job(self.client.get_containers)
         except Exception:
-            _LOGGER.warning("Failed to fetch container info", exc_info=True)
-            failures.append("containers")
+            _LOGGER.debug("Container fetch failed, reconnecting Docker session", exc_info=True)
+            try:
+                await self.hass.async_add_executor_job(self.client._reconnect_docker)
+                containers = await self.hass.async_add_executor_job(self.client.get_containers)
+            except Exception:
+                _LOGGER.warning("Failed to fetch container info after reconnect", exc_info=True)
+                failures.append("containers")
 
         try:
             projects = await self.hass.async_add_executor_job(self.client.get_projects)
         except Exception:
-            _LOGGER.warning("Failed to fetch project info", exc_info=True)
-            failures.append("projects")
+            _LOGGER.debug("Project fetch failed, reconnecting Docker session", exc_info=True)
+            try:
+                await self.hass.async_add_executor_job(self.client._reconnect_docker)
+                projects = await self.hass.async_add_executor_job(self.client.get_projects)
+            except Exception:
+                _LOGGER.warning("Failed to fetch project info after reconnect", exc_info=True)
+                failures.append("projects")
 
         if len(failures) == 4:
             return None
