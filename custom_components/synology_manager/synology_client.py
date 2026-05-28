@@ -189,6 +189,25 @@ class SynologyClient:
             release_notes=data.get("release_note", None),
         )
 
+    def _get_package_status(self) -> dict[str, dict[str, Any]]:
+        """Fetch per-package status and startable flags via compound API.
+
+        Returns a dict keyed by package ID with 'status' and 'startable' values.
+        """
+        try:
+            result = self._compound_request(
+                "SYNO.Core.Package", "list", 2, self._sysinfo.session,
+                params={"additional": ["status", "startable"]},
+            )
+            return {
+                pkg["id"]: pkg.get("additional", {})
+                for pkg in result.get("packages", [])
+                if isinstance(pkg, dict) and pkg.get("id")
+            }
+        except Exception:
+            _LOGGER.debug("Package status fetch via compound API failed", exc_info=True)
+            return {}
+
     def get_packages(self) -> list[PackageInfo]:
         """List all installed packages with update status."""
         installed = self._sysinfo.installed_package_list()
@@ -197,6 +216,8 @@ class SynologyClient:
         installable = self._package.list_installable()
         installable_data = installable.get("data", {}).get("packages", [])
         installable_map = {pkg["id"]: pkg for pkg in installable_data if isinstance(pkg, dict)}
+
+        status_map = self._get_package_status()
 
         packages = []
         for pkg in installed_data:
@@ -208,8 +229,11 @@ class SynologyClient:
             latest_ver = installable_pkg.get("version", "") if installable_pkg else None
             update_available = _is_newer(latest_ver, installed_ver) if latest_ver else False
 
-            additional = pkg.get("additional", {})
-            is_running = additional.get("status") == "running" if "status" in additional else None
+            pkg_status = status_map.get(pkg_id, {})
+            if pkg_status.get("startable"):
+                is_running = pkg_status.get("status") == "running"
+            else:
+                is_running = None
 
             packages.append(
                 PackageInfo(
@@ -384,15 +408,15 @@ class SynologyClient:
             self._reconnect_docker()
             return getattr(self._docker, method_name)(*args, **kwargs)
 
-    def _compound_project_request(self, method: str, params: dict | None = None) -> dict:
-        """Send a SYNO.Docker.Project request via the compound API wrapper.
+    def _compound_request(self, api: str, method: str, version: int, session, params: dict | None = None) -> dict:
+        """Send a request via the SYNO.Entry.Request compound API wrapper.
 
-        The Project API has requestFormat=JSON and only works through
-        SYNO.Entry.Request, not via direct GET/POST.
+        APIs with requestFormat=JSON only work through this wrapper,
+        not via direct GET/POST.
         """
         import requests as req_lib
 
-        inner = {"api": "SYNO.Docker.Project", "method": method, "version": 1}
+        inner: dict[str, Any] = {"api": api, "method": method, "version": version}
         if params:
             inner.update(params)
 
@@ -403,20 +427,26 @@ class SynologyClient:
             "method": "request",
             "version": 1,
             "compound": json.dumps([inner]),
-            "_sid": self._docker.session._sid,
+            "_sid": session._sid,
         }
         resp = req_lib.post(
             url,
             data=form,
             verify=self._verify_ssl,
-            headers={"X-SYNO-TOKEN": self._docker.session._syno_token},
+            headers={"X-SYNO-TOKEN": session._syno_token},
         )
         resp.raise_for_status()
         outer = resp.json()
         result = outer.get("data", {}).get("result", [{}])[0]
         if not result.get("success"):
-            raise RuntimeError(f"SYNO.Docker.Project {method} failed: {result}")
+            raise RuntimeError(f"{api} {method} failed: {result}")
         return result.get("data", {})
+
+    def _compound_project_request(self, method: str, params: dict | None = None) -> dict:
+        """Send a SYNO.Docker.Project request via the compound API."""
+        return self._compound_request(
+            "SYNO.Docker.Project", method, 1, self._docker.session, params
+        )
 
     def _build_project(self, project_id: str) -> dict:
         """Rebuild a compose project (pull new images, recreate containers).

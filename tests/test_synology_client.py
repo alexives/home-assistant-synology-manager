@@ -190,6 +190,7 @@ class TestPackages:
             verify_ssl=False,
         )
         client.connect()
+        client._get_package_status = MagicMock(return_value={})
         packages = client.get_packages()
 
         assert len(packages) == 2
@@ -202,6 +203,84 @@ class TestPackages:
         assert drive.update_available is False
         assert drive.latest_version == "3.5.0"
         assert drive.changelog is None
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_get_packages_is_running(self, mock_docker, mock_package, mock_sysinfo):
+        """Test that is_running is derived from compound API status for startable packages."""
+        mock_sys = MagicMock()
+        mock_sys.installed_package_list.return_value = {
+            "data": {
+                "packages": [
+                    {"id": "ContainerManager", "name": "Container Manager", "version": "3.1.0"},
+                    {"id": "LogCenter", "name": "Log Center", "version": "1.4.0"},
+                    {"id": "CodecPack", "name": "Codec Pack", "version": "2.0.0"},
+                ]
+            },
+            "success": True,
+        }
+        mock_sysinfo.return_value = mock_sys
+
+        mock_pkg = MagicMock()
+        mock_pkg.list_installable.return_value = {"data": {"packages": []}, "success": True}
+        mock_package.return_value = mock_pkg
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+        client._get_package_status = MagicMock(return_value={
+            "ContainerManager": {"status": "running", "startable": True},
+            "LogCenter": {"status": "stopped", "startable": True},
+            "CodecPack": {"status": "running", "startable": False},
+        })
+        packages = client.get_packages()
+
+        cm = next(p for p in packages if p.package_id == "ContainerManager")
+        assert cm.is_running is True
+
+        log = next(p for p in packages if p.package_id == "LogCenter")
+        assert log.is_running is False
+
+        codec = next(p for p in packages if p.package_id == "CodecPack")
+        assert codec.is_running is None
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_start_stop_package(self, mock_docker, mock_package, mock_sysinfo):
+        """Test start_package and stop_package call the correct API."""
+        mock_pkg = MagicMock()
+        mock_pkg.core_list = {
+            "SYNO.Core.Package.Control": {"path": "entry.cgi", "minVersion": 1},
+        }
+        mock_package.return_value = mock_pkg
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+
+        client.start_package("ContainerManager")
+        start_call = mock_pkg.request_data.call_args_list[-1]
+        assert start_call.kwargs["req_param"]["method"] == "start"
+        assert start_call.kwargs["req_param"]["id"] == "ContainerManager"
+
+        client.stop_package("LogCenter")
+        stop_call = mock_pkg.request_data.call_args_list[-1]
+        assert stop_call.kwargs["req_param"]["method"] == "stop"
+        assert stop_call.kwargs["req_param"]["id"] == "LogCenter"
 
 
 class TestContainers:
