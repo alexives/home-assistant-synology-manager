@@ -1,9 +1,0 @@
-{
-  "domain": "synology_upgrades",
-  "name": "Synology Upgrades",
-  "version": "0.1.0",
-  "config_flow": true,
-  "codeowners": ["@aives"],
-  "iot_class": "local_polling",
-  "requirements": ["synology-api>=0.8.0"]
-}
