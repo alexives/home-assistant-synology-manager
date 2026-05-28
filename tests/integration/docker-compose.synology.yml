@@ -1,0 +1,5 @@
+services:
+  test-app:
+    image: alexives/synology-test:latest
+    container_name: synology-test-app
+    restart: unless-stopped

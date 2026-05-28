@@ -1,4 +1,4 @@
-"""Tests for Synology Upgrades integration setup."""
+"""Tests for Synology Manager integration setup."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,7 +6,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.synology_upgrades.const import (
+from custom_components.synology_manager.const import (
     CONF_HOST,
     CONF_PASSWORD,
     CONF_PORT,
@@ -15,9 +15,10 @@ from custom_components.synology_upgrades.const import (
     CONF_VERIFY_SSL,
     DOMAIN,
 )
-from custom_components.synology_upgrades.synology_client import (
+from custom_components.synology_manager.synology_client import (
     DsmUpdateInfo,
     SynologyAuthenticationError,
+    SynologyClient,
     SynologyConnectionError,
 )
 
@@ -55,10 +56,12 @@ async def test_setup_entry(hass: HomeAssistant) -> None:
     )
     mock_client.get_packages.return_value = []
     mock_client.get_containers.return_value = []
+    mock_client.get_projects.return_value = []
+    mock_client.group_container_updates = SynologyClient.group_container_updates
 
     with (
         patch(
-            "custom_components.synology_upgrades.SynologyClient",
+            "custom_components.synology_manager.SynologyClient",
             return_value=mock_client,
         ),
         patch(
@@ -81,7 +84,7 @@ async def test_setup_entry_auth_failed(hass: HomeAssistant) -> None:
     mock_client.connect.side_effect = SynologyAuthenticationError("Bad credentials")
 
     with patch(
-        "custom_components.synology_upgrades.SynologyClient",
+        "custom_components.synology_manager.SynologyClient",
         return_value=mock_client,
     ):
         await hass.config_entries.async_setup(entry.entry_id)
@@ -101,7 +104,7 @@ async def test_setup_entry_connection_error(hass: HomeAssistant) -> None:
     mock_client.connect.side_effect = SynologyConnectionError("NAS unreachable")
 
     with patch(
-        "custom_components.synology_upgrades.SynologyClient",
+        "custom_components.synology_manager.SynologyClient",
         return_value=mock_client,
     ):
         await hass.config_entries.async_setup(entry.entry_id)
@@ -123,10 +126,12 @@ async def test_unload_entry(hass: HomeAssistant) -> None:
     )
     mock_client.get_packages.return_value = []
     mock_client.get_containers.return_value = []
+    mock_client.get_projects.return_value = []
+    mock_client.group_container_updates = SynologyClient.group_container_updates
 
     with (
         patch(
-            "custom_components.synology_upgrades.SynologyClient",
+            "custom_components.synology_manager.SynologyClient",
             return_value=mock_client,
         ),
         patch(

@@ -1,4 +1,4 @@
-"""Shared test fixtures for Synology Upgrades integration tests."""
+"""Shared test fixtures for Synology Manager integration tests."""
 
 import pathlib
 from unittest.mock import AsyncMock, patch

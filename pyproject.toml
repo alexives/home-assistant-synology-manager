@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 include = ["custom_components*"]
 
 [project]
-name = "home-assistant-synology-upgrades"
+name = "home-assistant-synology-manager"
 version = "0.1.0"
-description = "Home Assistant integration for Synology NAS upgrade management"
-requires-python = ">=3.13"
+description = "Home Assistant integration for Synology NAS management"
+requires-python = ">=3.14.2"
 
 [project.optional-dependencies]
 dev = [
@@ -29,4 +29,4 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["custom_components.synology_upgrades"]
+known-first-party = ["custom_components.synology_manager"]
