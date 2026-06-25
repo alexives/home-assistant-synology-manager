@@ -9,3 +9,6 @@ build/
 .env
 .coverage
 .ruff_cache/
+
+# Local, machine-specific Claude Code context (never commit)
+CLAUDE.local.md
