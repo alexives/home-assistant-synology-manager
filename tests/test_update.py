@@ -141,6 +141,29 @@ class TestPackageUpdateEntity:
         assert entity.installed_version == "3.5.0"
         assert entity.latest_version == "3.5.0"
 
+    def test_build_only_bump_shows_update_available(self, mock_coordinator):
+        """A build-suffix-only bump (1.5.2-1831 -> -1832) must register as an update.
+
+        HA core's default version_is_newer (AwesomeVersion) treats these as equal
+        and renders "Up-to-date", so the entity must override it with Synology's
+        build-aware comparison.
+        """
+        mock_coordinator.data["packages"].append(
+            PackageInfo(
+                package_id="HybridShare",
+                display_name="Hybrid Share",
+                installed_version="1.5.2-1831",
+                latest_version="1.5.2-1832",
+                update_available=True,
+                changelog=None,
+                is_running=True,
+            )
+        )
+        entity = SynologyPackageUpdateEntity(mock_coordinator, "HybridShare")
+
+        assert entity.version_is_newer("1.5.2-1832", "1.5.2-1831") is True
+        assert entity.state == "on"
+
     @pytest.mark.asyncio
     async def test_install_triggers_security_scan(self, mock_coordinator):
         """Test that package install triggers security scan after."""

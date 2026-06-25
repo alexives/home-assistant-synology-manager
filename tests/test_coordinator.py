@@ -103,6 +103,23 @@ async def test_coordinator_packages_failure_preserves_other_data(
     assert len(coordinator.data["project_updates"]) == 1
 
 
+async def test_coordinator_core_failure_recovers_after_reconnect(
+    hass: HomeAssistant, mock_client
+) -> None:
+    """A stale SysInfo/Package session is reconnected and the fetch retried."""
+    dsm = mock_client.get_dsm_update.return_value
+    packages = mock_client.get_packages.return_value
+    mock_client.get_dsm_update.side_effect = [Exception("Invalid session"), dsm]
+    mock_client.get_packages.side_effect = [Exception("Invalid session"), packages]
+
+    coordinator = SynologyManagerCoordinator(hass, mock_client, "Test Nas")
+    await coordinator.async_refresh()
+
+    assert coordinator.data["dsm"] is dsm
+    assert coordinator.data["packages"] == packages
+    assert mock_client.reconnect.called
+
+
 async def test_coordinator_all_fail_raises(hass: HomeAssistant, mock_client) -> None:
     """Test that coordinator raises UpdateFailed when all sources fail."""
     mock_client.get_dsm_update.side_effect = Exception("DSM down")

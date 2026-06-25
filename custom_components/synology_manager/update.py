@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import SynologyManagerCoordinator
-from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo
+from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
 
 
 async def async_setup_entry(
@@ -119,6 +119,15 @@ class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
             if pkg.package_id == self._package_id:
                 return pkg
         return None
+
+    def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
+        """Compare Synology package versions (``X.Y.Z-BUILD``).
+
+        HA's default comparison (AwesomeVersion) ignores the build suffix, so a
+        build-only bump (e.g. ``1.5.2-1831`` -> ``1.5.2-1832``) would otherwise
+        render as "Up-to-date".
+        """
+        return _is_newer(latest_version, installed_version)
 
     @property
     def name(self) -> str:

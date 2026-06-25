@@ -823,7 +823,7 @@ class TestDockerWriteOperations:
         def fake_reconnect():
             client._docker = fresh_docker
 
-        client._reconnect_docker = fake_reconnect
+        client.reconnect = fake_reconnect
         result = client._docker_write("stop_project", "uuid-123")
 
         assert result == {"success": True}
@@ -1082,7 +1082,7 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
-        client._reconnect_docker = lambda: None
+        client.reconnect = lambda: None
 
         client._build_project = MagicMock()
         client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
@@ -1116,7 +1116,7 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
-        client._reconnect_docker = lambda: None
+        client.reconnect = lambda: None
 
         client.update_container("standalone-app", "ghcr.io/org/app:1.0")
 
@@ -1166,7 +1166,7 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
-        client._reconnect_docker = lambda: None
+        client.reconnect = lambda: None
         client._build_project = MagicMock()
 
         client.update_container("rallly-rallly-1", "lukevella/rallly:3.12.1")
@@ -1208,7 +1208,7 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
-        client._reconnect_docker = lambda: None
+        client.reconnect = lambda: None
         client._build_project = MagicMock()
 
         client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
@@ -1248,7 +1248,7 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
-        client._reconnect_docker = lambda: None
+        client.reconnect = lambda: None
         client._build_project = MagicMock()
 
         client.update_container("app", "lscr.io/linuxserver/plex:latest")
@@ -1296,3 +1296,6 @@ class TestDisplayNameHelpers:
         assert _is_newer("4.0.0", "4.1.0") is False
         assert _is_newer("", "4.1.0") is False
         assert _is_newer("unknown-v2", "unknown-v1") is True
+        # Same version, newer build number (Synology bumps the suffix after the dash)
+        assert _is_newer("1.5.2-1832", "1.5.2-1831") is True
+        assert _is_newer("1.5.2-1831", "1.5.2-1832") is False

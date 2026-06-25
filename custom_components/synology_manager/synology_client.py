@@ -108,13 +108,27 @@ def _container_display_name(
 
 
 def _is_newer(candidate: str, installed: str) -> bool:
-    """Return True if candidate is a newer version than installed."""
+    """Return True if candidate is a newer version than installed.
+
+    Synology versions are ``X.Y.Z-BUILD``. The build suffix is significant —
+    updates often bump only the build (e.g. ``1.5.2-1831`` -> ``1.5.2-1832``) —
+    so compare it when the leading version is equal.
+    """
     if not candidate or candidate == installed:
         return False
     try:
-        return Version(candidate.split("-")[0]) > Version(installed.split("-")[0])
+        cand_ver = Version(candidate.split("-")[0])
+        inst_ver = Version(installed.split("-")[0])
     except InvalidVersion:
         return candidate != installed
+    if cand_ver != inst_ver:
+        return cand_ver > inst_ver
+    cand_build = candidate.split("-", 1)[1] if "-" in candidate else ""
+    inst_build = installed.split("-", 1)[1] if "-" in installed else ""
+    try:
+        return int(cand_build) > int(inst_build)
+    except ValueError:
+        return cand_build > inst_build
 
 
 class SynologyClient:
@@ -155,12 +169,29 @@ class SynologyClient:
             "otp_code": self._otp_code,
         }
 
+    @staticmethod
+    def _clear_shared_session() -> None:
+        """Drop the library's class-level session so the next constructor re-authenticates.
+
+        synology-api caches one session on ``BaseApi.shared_session`` and reuses
+        it for every API class. Without clearing it, reconstructing a wrapper (on
+        reconnect or HA reload) resurrects the stale SID instead of logging in.
+        """
+        try:
+            from synology_api.base_api import BaseApi
+
+            BaseApi.shared_session = None
+        except Exception:
+            _LOGGER.debug("Could not clear shared session", exc_info=True)
+
     def connect(self) -> None:
         """Authenticate and create API instances.
 
+        Clears any cached session first so each connect mints a fresh login.
         Raises SynologyAuthenticationError on bad credentials.
         Raises SynologyConnectionError if NAS is unreachable.
         """
+        self._clear_shared_session()
         kwargs = self._api_kwargs()
         try:
             self._sysinfo = SysInfo(**kwargs)
@@ -405,7 +436,7 @@ class SynologyClient:
             return getattr(self._docker, method_name)(*args, **kwargs)
         except Exception:
             _LOGGER.debug("Docker %s failed, reconnecting and retrying", method_name, exc_info=True)
-            self._reconnect_docker()
+            self.reconnect()
             return getattr(self._docker, method_name)(*args, **kwargs)
 
     def _compound_request(self, api: str, method: str, version: int, session, params: dict | None = None) -> dict:
@@ -583,25 +614,27 @@ class SynologyClient:
         except Exception:
             _LOGGER.debug("Security scan trigger failed", exc_info=True)
 
-    def _reconnect_docker(self) -> None:
-        """Re-create the Docker API session (e.g. after a failed pull invalidates it)."""
-        from synology_api.base_api import BaseApi
+    def reconnect(self) -> None:
+        """Re-authenticate and rebuild every API wrapper (best-effort).
 
+        One shared session backs SysInfo, Package, and Docker, so a single
+        reconnect refreshes all read and write paths. Best-effort: failures are
+        logged and the caller retries the operation against the new session.
+        """
         try:
-            BaseApi.shared_session = None
-            self._docker = DockerApi(**self._api_kwargs())
+            self.connect()
         except Exception:
-            _LOGGER.warning("Docker reconnect failed", exc_info=True)
+            _LOGGER.warning("Reconnect failed", exc_info=True)
 
     def update_container(self, container_name: str, image: str) -> None:
         """Rebuild a container's compose project with the latest image on disk."""
-        self._reconnect_docker()
+        self.reconnect()
         repo = image.split(":")[0] if ":" in image else image
         tag = image.split(":")[-1] if ":" in image else "latest"
 
         if not repo.startswith(("ghcr.io/", "lscr.io/")):
             self._pull_image(repo, tag)
-            self._reconnect_docker()
+            self.reconnect()
 
         project_id = self._find_project_for_container(container_name)
         if project_id:
@@ -633,13 +666,13 @@ class SynologyClient:
 
     def update_project(self, project_id: str, images: list[str]) -> None:
         """Pull images that need it, then rebuild the compose project."""
-        self._reconnect_docker()
+        self.reconnect()
         for image in images:
             repo = image.split(":")[0] if ":" in image else image
             tag = image.split(":")[-1] if ":" in image else "latest"
             if not repo.startswith(("ghcr.io/", "lscr.io/")):
                 self._pull_image(repo, tag)
-                self._reconnect_docker()
+                self.reconnect()
         self._build_project(project_id)
 
     def _pull_image(self, repo: str, tag: str) -> None:

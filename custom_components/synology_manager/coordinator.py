@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -29,66 +30,55 @@ class SynologyManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.server_name = server_name
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from all three sources with per-source error isolation."""
+        """Fetch data from all sources with per-source error isolation."""
         data = await self._fetch_all()
-
-        if data is None:
-            _LOGGER.debug("All sources failed, reconnecting and retrying")
-            try:
-                await self.hass.async_add_executor_job(self.client.connect)
-                _LOGGER.debug("Reconnect succeeded")
-            except Exception:
-                _LOGGER.warning("Reconnect failed", exc_info=True)
-            data = await self._fetch_all()
-
         if data is None:
             raise UpdateFailed("All data sources failed")
-
         return data
+
+    async def _fetch_source(
+        self,
+        name: str,
+        fetch: Callable[[], Any],
+        default: Any,
+        failures: list[str],
+    ) -> Any:
+        """Fetch one source, reconnecting the shared session and retrying once on failure.
+
+        On unrecoverable failure, records the source name in ``failures`` and
+        returns ``default`` so the other sources still update.
+        """
+        try:
+            return await self.hass.async_add_executor_job(fetch)
+        except Exception:
+            _LOGGER.debug("%s fetch failed, reconnecting session", name, exc_info=True)
+            try:
+                await self.hass.async_add_executor_job(self.client.reconnect)
+                return await self.hass.async_add_executor_job(fetch)
+            except Exception:
+                _LOGGER.warning("Failed to fetch %s after reconnect", name, exc_info=True)
+                failures.append(name)
+                return default
 
     async def _fetch_all(self) -> dict[str, Any] | None:
         """Try fetching all sources. Returns None if all fail."""
-        dsm = None
-        packages = []
-        containers = []
-        projects = []
-        failures = []
+        failures: list[str] = []
+        sources = (
+            ("dsm", self.client.get_dsm_update, None),
+            ("packages", self.client.get_packages, []),
+            ("containers", self.client.get_containers, []),
+            ("projects", self.client.get_projects, []),
+        )
+        results = {
+            name: await self._fetch_source(name, fetch, default, failures)
+            for name, fetch, default in sources
+        }
+        dsm = results["dsm"]
+        packages = results["packages"]
+        containers = results["containers"]
+        projects = results["projects"]
 
-        try:
-            dsm = await self.hass.async_add_executor_job(self.client.get_dsm_update)
-        except Exception:
-            _LOGGER.warning("Failed to fetch DSM update info", exc_info=True)
-            failures.append("dsm")
-
-        try:
-            packages = await self.hass.async_add_executor_job(self.client.get_packages)
-        except Exception:
-            _LOGGER.warning("Failed to fetch package info", exc_info=True)
-            failures.append("packages")
-
-        try:
-            containers = await self.hass.async_add_executor_job(self.client.get_containers)
-        except Exception:
-            _LOGGER.debug("Container fetch failed, reconnecting Docker session", exc_info=True)
-            try:
-                await self.hass.async_add_executor_job(self.client._reconnect_docker)
-                containers = await self.hass.async_add_executor_job(self.client.get_containers)
-            except Exception:
-                _LOGGER.warning("Failed to fetch container info after reconnect", exc_info=True)
-                failures.append("containers")
-
-        try:
-            projects = await self.hass.async_add_executor_job(self.client.get_projects)
-        except Exception:
-            _LOGGER.debug("Project fetch failed, reconnecting Docker session", exc_info=True)
-            try:
-                await self.hass.async_add_executor_job(self.client._reconnect_docker)
-                projects = await self.hass.async_add_executor_job(self.client.get_projects)
-            except Exception:
-                _LOGGER.warning("Failed to fetch project info after reconnect", exc_info=True)
-                failures.append("projects")
-
-        if len(failures) == 4:
+        if len(failures) == len(sources):
             return None
 
         project_updates, standalone_containers = self.client.group_container_updates(

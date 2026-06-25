@@ -4,6 +4,9 @@
 
 A Home Assistant custom integration for Synology NAS devices — update entities for DSM firmware, installed packages, and Docker containers, plus switch entities for Docker compose project control.
 
+> [!NOTE]
+> This integration was almost entirely AI-coded (Claude). It has automated tests and works against a real NAS, but it has not had a thorough line-by-line human review. Use at your own risk, review it before trusting it on your system, and please report any issues.
+
 ## Features
 
 - **DSM Firmware Updates** — see available DSM versions and trigger upgrades
