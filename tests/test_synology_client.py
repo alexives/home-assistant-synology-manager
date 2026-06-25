@@ -1299,3 +1299,93 @@ class TestDisplayNameHelpers:
         # Same version, newer build number (Synology bumps the suffix after the dash)
         assert _is_newer("1.5.2-1832", "1.5.2-1831") is True
         assert _is_newer("1.5.2-1831", "1.5.2-1832") is False
+
+
+class TestPackageUpgrade:
+    """Tests for the package upgrade flow."""
+
+    def _make_client(self, mock_package_cls, mock_sysinfo_cls, target="1.5.2-1832"):
+        pkg = MagicMock()
+        pkg.list_installable.return_value = {
+            "data": {
+                "packages": [
+                    {
+                        "id": "HybridShare",
+                        "version": target,
+                        "link": "https://example.com/hs.spk",
+                        "md5": "deadbeef",
+                        "size": 12345,
+                    }
+                ]
+            }
+        }
+        pkg.download_package.return_value = {
+            "data": {"taskid": "@SYNOPKG_DOWNLOAD_HybridShare", "progress": 0.0}
+        }
+        pkg.get_dowload_package_status.return_value = {
+            "data": {"finished": True, "progress": 1.0}
+        }
+        pkg.check_installation_from_download.return_value = {
+            "data": {"filename": "/volume1/@tmp/synopkg/download.xxx/@SYNOPKG_DOWNLOAD_HybridShare"}
+        }
+        pkg.check_installation.return_value = {"data": {"volume_path": ""}}
+        pkg.install_package.return_value = {"data": {"has_fail": False}, "success": True}
+        mock_package_cls.return_value = pkg
+
+        sysinfo = MagicMock()
+        sysinfo.installed_package_list.return_value = {
+            "data": {"packages": [{"id": "HybridShare", "version": target}]}
+        }
+        mock_sysinfo_cls.return_value = sysinfo
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+        return client, pkg, sysinfo
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_downloads_then_installs_with_force(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Upgrade must download the SPK, then install the downloaded file with force."""
+        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        client.upgrade_package("HybridShare")
+
+        # Step 1: download using the installable link/checksum/size
+        pkg.download_package.assert_called_once_with(
+            "https://example.com/hs.spk", "HybridShare", "deadbeef", 12345
+        )
+        # Step 2: poll the download status with the returned task id
+        pkg.get_dowload_package_status.assert_called_with("@SYNOPKG_DOWNLOAD_HybridShare")
+        # Step 3: resolve the downloaded file via the task id
+        pkg.check_installation_from_download.assert_called_with("@SYNOPKG_DOWNLOAD_HybridShare")
+        # Step 4: install the downloaded file with force (the bare `upgrade` method
+        # returns error 4501 for system packages)
+        pkg.install_package.assert_called_once()
+        args, kwargs = pkg.install_package.call_args
+        assert args[0] == "HybridShare"
+        assert args[2] == "/volume1/@tmp/synopkg/download.xxx/@SYNOPKG_DOWNLOAD_HybridShare"
+        assert kwargs.get("force") is True
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_raises_when_no_download_task(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """If the download step returns no task id, fail loudly instead of silently."""
+        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        pkg.download_package.return_value = {"data": {}}
+
+        with pytest.raises(RuntimeError):
+            client.upgrade_package("HybridShare")
+        pkg.install_package.assert_not_called()

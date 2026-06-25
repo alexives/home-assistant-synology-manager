@@ -567,7 +567,12 @@ class SynologyClient:
         )
 
     def upgrade_package(self, package_id: str) -> None:
-        """Trigger a package upgrade via SYNO.Core.Package.Installation."""
+        """Upgrade a package via the DSM download-then-upgrade flow.
+
+        DSM requires the SPK to be downloaded first (which yields a task id),
+        and the upgrade is then performed against that task id. Firing a bare
+        ``install`` request with the URL is accepted but never actually upgrades.
+        """
         import time
 
         response = self._package.list_installable()
@@ -576,24 +581,53 @@ class SynologyClient:
         if pkg_info is None:
             raise RuntimeError(f"Package {package_id} not found in installable list")
 
-        _LOGGER.debug("Upgrading package %s to %s", package_id, pkg_info.get("version", ""))
-        response = self._package.request_data(
-            "SYNO.Core.Package.Installation",
-            "entry.cgi",
-            req_param={
-                "method": "install",
-                "version": 1,
-                "operation": "upgrade",
-                "type": 0,
-                "blqinst": False,
-                "url": pkg_info.get("link", ""),
-                "name": package_id,
-                "checksum": pkg_info.get("md5", ""),
-                "filesize": pkg_info.get("size", 0),
-            },
-        )
         target_ver = pkg_info.get("version", "")
+        _LOGGER.debug("Upgrading package %s to %s", package_id, target_ver)
 
+        # Step 1: download the SPK to the NAS; this returns a task id.
+        download = self._package.download_package(
+            pkg_info.get("link", ""),
+            package_id,
+            pkg_info.get("md5", ""),
+            pkg_info.get("size", 0),
+        )
+        task_id = download.get("data", {}).get("taskid", "")
+        if not task_id:
+            raise RuntimeError(
+                f"Package {package_id} download did not return a task id: {download}"
+            )
+
+        # Step 2: wait for the download to finish.
+        for _ in range(120):
+            status = self._package.get_dowload_package_status(task_id)
+            if status.get("data", {}).get("finished"):
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError(f"Package {package_id} download did not finish within timeout")
+
+        # Step 3: resolve the downloaded file path and target volume.
+        downloaded = self._package.check_installation_from_download(task_id)
+        file_path = downloaded.get("data", {}).get("filename", "")
+        if not file_path:
+            raise RuntimeError(f"Package {package_id} downloaded file path not found")
+        volume_path = (
+            self._package.check_installation(package_id).get("data", {}).get("volume_path", "")
+        )
+
+        # Step 4: install the downloaded package with force to upgrade in place.
+        # (The library's `upgrade` method returns error 4501 for system packages;
+        # the compound check+install flow is what Package Center actually uses.)
+        self._package.install_package(
+            package_id,
+            volume_path,
+            file_path,
+            check_codesign=False,
+            force=True,
+            installrunpackage=True,
+        )
+
+        # Step 5: confirm the installed version reaches the target.
         for _ in range(120):
             installed = self._sysinfo.installed_package_list()
             for pkg in installed.get("data", {}).get("packages", []):
