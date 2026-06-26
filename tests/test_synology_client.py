@@ -235,11 +235,13 @@ class TestPackages:
             verify_ssl=False,
         )
         client.connect()
-        client._get_package_status = MagicMock(return_value={
-            "ContainerManager": {"status": "running", "startable": True},
-            "LogCenter": {"status": "stopped", "startable": True},
-            "CodecPack": {"status": "running", "startable": False},
-        })
+        client._get_package_status = MagicMock(
+            return_value={
+                "ContainerManager": {"status": "running", "startable": True},
+                "LogCenter": {"status": "stopped", "startable": True},
+                "CodecPack": {"status": "running", "startable": False},
+            }
+        )
         packages = client.get_packages()
 
         cm = next(p for p in packages if p.package_id == "ContainerManager")
@@ -1322,9 +1324,7 @@ class TestPackageUpgrade:
         pkg.download_package.return_value = {
             "data": {"taskid": "@SYNOPKG_DOWNLOAD_HybridShare", "progress": 0.0}
         }
-        pkg.get_dowload_package_status.return_value = {
-            "data": {"finished": True, "progress": 1.0}
-        }
+        pkg.get_dowload_package_status.return_value = {"data": {"finished": True, "progress": 1.0}}
         pkg.check_installation_from_download.return_value = {
             "data": {"filename": "/volume1/@tmp/synopkg/download.xxx/@SYNOPKG_DOWNLOAD_HybridShare"}
         }
@@ -1389,3 +1389,45 @@ class TestPackageUpgrade:
         with pytest.raises(RuntimeError):
             client.upgrade_package("HybridShare")
         pkg.install_package.assert_not_called()
+
+
+class TestTriggerSecurityScan:
+    """Tests for the Security Advisor scan trigger."""
+
+    def _make_client(self):
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+        )
+        client._sysinfo = MagicMock()
+        return client
+
+    def test_trigger_uses_securityscan_operation_start(self):
+        """The trigger must call SYNO.Core.SecurityScan.Operation 'start'.
+
+        The old SYNO.Core.SecurityScan.Status 'system_scan' method does not
+        exist on DSM 7 (error 103), so the scan never actually ran.
+        """
+        client = self._make_client()
+
+        client.trigger_security_scan()
+
+        client._sysinfo.request_data.assert_called_once()
+        args, kwargs = client._sysinfo.request_data.call_args
+        assert args[0] == "SYNO.Core.SecurityScan.Operation"
+        req_param = kwargs.get("req_param", args[2] if len(args) > 2 else {})
+        assert req_param["method"] == "start"
+
+    def test_trigger_logs_failure_instead_of_silently_swallowing(self, caplog):
+        """A failed scan trigger must be surfaced in the logs, not hidden."""
+        import logging
+
+        client = self._make_client()
+        client._sysinfo.request_data.side_effect = RuntimeError("Core Error: 1300")
+
+        with caplog.at_level(logging.WARNING):
+            client.trigger_security_scan()  # must not raise
+
+        assert any("1300" in r.message or "scan" in r.message.lower() for r in caplog.records)
