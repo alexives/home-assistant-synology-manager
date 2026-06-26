@@ -299,7 +299,7 @@ def test_upgradable_flag_prep(nas: NASClient):
     assert ctr_id == disk_id, "Expected no local mismatch"
 
     if nas.is_image_upgradable():
-        print("  Upgradable flag already set — ready to verify")
+        print("  Upgradable flag already set - ready to verify")
     else:
         print("  Upgradable flag not set yet")
         print("  ACTION REQUIRED: In Container Manager, check for updates on")

@@ -1,4 +1,4 @@
-# Synology Upgrades — Home Assistant Custom Integration
+# Synology Upgrades - Home Assistant Custom Integration
 
 ## Overview
 
@@ -8,15 +8,15 @@ A HACS-installable Home Assistant custom integration that provides `update` enti
 
 Three categories of update entities from a single integration:
 
-1. **DSM Firmware** — one entity per NAS showing installed vs. available DSM version, with install support (triggers firmware download + apply; NAS reboots)
-2. **Installed Packages** — one persistent entity per installed Synology package (e.g., Hyper Backup, Synology Drive Server). Shows current vs. available version; install triggers the package update. Automatically triggers a Security Advisor scan after each successful package install.
-3. **Containers** — one persistent entity per Docker/Container Manager container. Uses Synology's built-in update check to determine if a newer image exists. Install pulls the new image, stops the container, recreates it with the new image (preserving volumes/network/environment), and starts it.
+1. **DSM Firmware** - one entity per NAS showing installed vs. available DSM version, with install support (triggers firmware download + apply; NAS reboots)
+2. **Installed Packages** - one persistent entity per installed Synology package (e.g., Hyper Backup, Synology Drive Server). Shows current vs. available version; install triggers the package update. Automatically triggers a Security Advisor scan after each successful package install.
+3. **Containers** - one persistent entity per Docker/Container Manager container. Uses Synology's built-in update check to determine if a newer image exists. Install pulls the new image, stops the container, recreates it with the new image (preserving volumes/network/environment), and starts it.
 
 ## Architecture
 
 ### Single Coordinator Pattern
 
-One `DataUpdateCoordinator` polls all three data sources every 6 hours. Each source (DSM, packages, containers) is fetched independently within `_async_update_data` — if one fails, the others still update and the failed source retains its last-known data with a warning logged.
+One `DataUpdateCoordinator` polls all three data sources every 6 hours. Each source (DSM, packages, containers) is fetched independently within `_async_update_data` - if one fails, the others still update and the failed source retains its last-known data with a warning logged.
 
 ### API Library
 
@@ -27,13 +27,13 @@ Uses the `synology-api` library (N4S4) for all Synology API interactions. This l
 UI-based config flow (no YAML). One config entry per NAS device. Users add the integration multiple times for multiple NAS devices.
 
 Config flow collects:
-- **Host/IP** — NAS address
-- **Port** — default 5001 (HTTPS)
-- **Username** — must be an admin account
+- **Host/IP** - NAS address
+- **Port** - default 5001 (HTTPS)
+- **Username** - must be an admin account
 - **Password**
-- **Use HTTPS** — default on
-- **Verify SSL** — default off (most NAS use self-signed certs)
-- **OTP code** — additional step if 2FA is enabled
+- **Use HTTPS** - default on
+- **Verify SSL** - default off (most NAS use self-signed certs)
+- **OTP code** - additional step if 2FA is enabled
 
 Credentials are validated during config flow by attempting a login. Stored in HA's config entry (encrypted at rest).
 
@@ -86,7 +86,7 @@ All entities extend `UpdateEntity` with `UpdateEntityFeature.INSTALL`.
 - **Entity ID**: `update.{nas_name}_dsm`
 - **Title**: "DSM"
 - **Properties**: `installed_version`, `latest_version` from coordinator's `dsm` data
-- **install()**: Calls `SYNO.Core.Upgrade.Server` to download firmware and apply. Sets `in_progress = True`. NAS reboots — entity becomes unavailable during reboot and recovers when NAS comes back.
+- **install()**: Calls `SYNO.Core.Upgrade.Server` to download firmware and apply. Sets `in_progress = True`. NAS reboots - entity becomes unavailable during reboot and recovers when NAS comes back.
 - **release_notes()**: Returns notes from API if available
 
 ### SynologyPackageUpdateEntity
@@ -132,7 +132,7 @@ synology_upgrades_component/          # repository root
 │       ├── __init__.py               # async_setup_entry, creates API client + coordinator
 │       ├── manifest.json             # domain, requirements, codeowners, iot_class
 │       ├── config_flow.py            # UI config flow with credential validation + 2FA
-│       ├── coordinator.py            # DataUpdateCoordinator — polls DSM, packages, containers
+│       ├── coordinator.py            # DataUpdateCoordinator - polls DSM, packages, containers
 │       ├── update.py                 # Three UpdateEntity subclasses
 │       ├── const.py                  # Domain name, defaults, API constants
 │       ├── strings.json              # Config flow UI strings
@@ -233,7 +233,7 @@ known-first-party = ["custom_components.synology_upgrades"]
 
 - Single coordinator polls every 6 hours
 - All three sources fetched per refresh with per-source error isolation
-- Minimal NAS load — 6-hour interval is well under any rate limit concerns
+- Minimal NAS load - 6-hour interval is well under any rate limit concerns
 - Coordinator refresh can be triggered manually via HA's "Update entity" refresh button
 
 ## Key Decisions

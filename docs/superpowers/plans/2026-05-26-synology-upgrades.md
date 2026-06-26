@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a HACS-installable Home Assistant custom integration that provides `update` entities for Synology NAS devices — DSM firmware, installed packages, and Docker containers — all with install support.
+**Goal:** Build a HACS-installable Home Assistant custom integration that provides `update` entities for Synology NAS devices - DSM firmware, installed packages, and Docker containers - all with install support.
 
 **Architecture:** Single `DataUpdateCoordinator` polls three data sources every 6 hours via a `SynologyClient` wrapper. The wrapper uses the `synology-api` (N4S4) library for read operations and raw HTTP calls for write operations (trigger upgrade, pull image, recreate container, trigger security scan) that the library doesn't cover. All synology-api calls are synchronous (`requests`-based) and run via `hass.async_add_executor_job`.
 
 **Tech Stack:** Python 3.13+, Home Assistant `UpdateEntity` platform, `synology-api` library, `pytest-homeassistant-custom-component` for tests, ruff for linting.
 
-**Reference repo:** `../home_assistant_gitlab_duo` — follow its patterns for pyproject.toml, conftest.py, config flow tests, CI, docker-compose, CLAUDE.md.
+**Reference repo:** `../home_assistant_gitlab_duo` - follow its patterns for pyproject.toml, conftest.py, config flow tests, CI, docker-compose, CLAUDE.md.
 
 ---
 
@@ -173,9 +173,9 @@ A Home Assistant custom integration that provides update entities for Synology N
 
 ## Features
 
-- **DSM Firmware Updates** — see available DSM versions and trigger upgrades
-- **Package Updates** — track and install updates for all installed Synology packages
-- **Container Updates** — detect and apply Docker container image updates via Container Manager
+- **DSM Firmware Updates** - see available DSM versions and trigger upgrades
+- **Package Updates** - track and install updates for all installed Synology packages
+- **Container Updates** - detect and apply Docker container image updates via Container Manager
 
 ## Installation
 
@@ -379,7 +379,7 @@ class TestClientConstruction:
 pip install -e ".[dev]" && python -m pytest tests/test_synology_client.py -v
 ```
 
-Expected: FAIL — `synology_client` module doesn't exist yet.
+Expected: FAIL - `synology_client` module doesn't exist yet.
 
 - [ ] **Step 3: Write the client implementation**
 
@@ -572,7 +572,7 @@ class SynologyClient:
     def upgrade_dsm(self) -> None:
         """Trigger DSM firmware download and install.
 
-        This is a raw API call — the synology-api library doesn't
+        This is a raw API call - the synology-api library doesn't
         expose a method to trigger the actual upgrade.
         """
         self._sysinfo.request_data(
@@ -588,7 +588,7 @@ class SynologyClient:
     def trigger_security_scan(self) -> None:
         """Trigger a Security Advisor scan.
 
-        Raw API call — the library only reads scan config/status.
+        Raw API call - the library only reads scan config/status.
         """
         self._sysinfo.request_data(
             "SYNO.Core.SecurityScan.Status",
@@ -606,7 +606,7 @@ class SynologyClient:
         5. Recreate from exported settings with new image
         6. Start the container
 
-        Uses raw API calls for pull/create/delete — the library
+        Uses raw API calls for pull/create/delete - the library
         only covers list/start/stop.
         """
         self._docker.stop_container(container_name)
@@ -1045,7 +1045,7 @@ async def test_form_already_configured(hass: HomeAssistant) -> None:
 python -m pytest tests/test_config_flow.py -v
 ```
 
-Expected: FAIL — `config_flow` module doesn't exist yet.
+Expected: FAIL - `config_flow` module doesn't exist yet.
 
 - [ ] **Step 4: Write config_flow.py**
 
@@ -1328,7 +1328,7 @@ async def test_coordinator_all_fail_raises(hass: HomeAssistant, mock_client) -> 
 python -m pytest tests/test_coordinator.py -v
 ```
 
-Expected: FAIL — `coordinator` module doesn't exist yet.
+Expected: FAIL - `coordinator` module doesn't exist yet.
 
 - [ ] **Step 3: Write coordinator.py**
 
@@ -1610,7 +1610,7 @@ class TestContainerUpdateEntity:
 python -m pytest tests/test_update.py -v
 ```
 
-Expected: FAIL — `update` module doesn't exist yet.
+Expected: FAIL - `update` module doesn't exist yet.
 
 - [ ] **Step 3: Write update.py**
 
@@ -1951,7 +1951,7 @@ async def test_unload_entry(hass: HomeAssistant) -> None:
 python -m pytest tests/test_init.py -v
 ```
 
-Expected: FAIL — `__init__.py` is just a placeholder.
+Expected: FAIL - `__init__.py` is just a placeholder.
 
 - [ ] **Step 3: Write the full __init__.py**
 
@@ -2082,15 +2082,15 @@ ruff format custom_components/ tests/
 
 ## What this is
 
-A Home Assistant custom integration that provides update entities for Synology NAS devices — DSM firmware, installed packages, and Docker containers — all with install support.
+A Home Assistant custom integration that provides update entities for Synology NAS devices - DSM firmware, installed packages, and Docker containers - all with install support.
 
 ## Architecture
 
-- `synology_client.py` — Wrapper around the `synology-api` (N4S4) library. Uses the library's `SysInfo`, `Package`, and `Docker` classes for read operations. Makes raw API calls via `request_data()` for write operations not covered by the library (trigger DSM upgrade, pull Docker image, recreate container, trigger security scan). All methods are synchronous (`requests`-based).
-- `coordinator.py` — `DataUpdateCoordinator` that polls all three data sources (DSM, packages, containers) every 6 hours. Calls `synology_client` methods via `hass.async_add_executor_job` since the API is sync. Per-source error isolation: if one source fails, others still update.
-- `update.py` — Three `UpdateEntity` subclasses: `SynologyDSMUpdateEntity`, `SynologyPackageUpdateEntity`, `SynologyContainerUpdateEntity`. All support `INSTALL`. Package install auto-triggers a Security Advisor scan.
-- `config_flow.py` — UI config flow collecting host, port, credentials, SSL settings. Validates by attempting a login.
-- `__init__.py` — Entry setup: creates client, connects, creates coordinator, forwards to update platform.
+- `synology_client.py` - Wrapper around the `synology-api` (N4S4) library. Uses the library's `SysInfo`, `Package`, and `Docker` classes for read operations. Makes raw API calls via `request_data()` for write operations not covered by the library (trigger DSM upgrade, pull Docker image, recreate container, trigger security scan). All methods are synchronous (`requests`-based).
+- `coordinator.py` - `DataUpdateCoordinator` that polls all three data sources (DSM, packages, containers) every 6 hours. Calls `synology_client` methods via `hass.async_add_executor_job` since the API is sync. Per-source error isolation: if one source fails, others still update.
+- `update.py` - Three `UpdateEntity` subclasses: `SynologyDSMUpdateEntity`, `SynologyPackageUpdateEntity`, `SynologyContainerUpdateEntity`. All support `INSTALL`. Package install auto-triggers a Security Advisor scan.
+- `config_flow.py` - UI config flow collecting host, port, credentials, SSL settings. Validates by attempting a login.
+- `__init__.py` - Entry setup: creates client, connects, creates coordinator, forwards to update platform.
 
 ## Key details
 
@@ -2118,7 +2118,7 @@ ruff format --check custom_components/ tests/
 ```bash
 docker compose -f docker-compose.dev.yml up -d
 # HA available at http://localhost:8123
-# custom_components/ is volume-mounted — restart container after code changes
+# custom_components/ is volume-mounted - restart container after code changes
 docker restart ha-dev
 ```
 

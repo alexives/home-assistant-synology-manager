@@ -110,8 +110,8 @@ def _container_display_name(
 def _is_newer(candidate: str, installed: str) -> bool:
     """Return True if candidate is a newer version than installed.
 
-    Synology versions are ``X.Y.Z-BUILD``. The build suffix is significant —
-    updates often bump only the build (e.g. ``1.5.2-1831`` -> ``1.5.2-1832``) —
+    Synology versions are ``X.Y.Z-BUILD``. The build suffix is significant -
+    updates often bump only the build (e.g. ``1.5.2-1831`` -> ``1.5.2-1832``) -
     so compare it when the leading version is equal.
     """
     if not candidate or candidate == installed:
@@ -646,7 +646,7 @@ class SynologyClient:
         """Trigger a Security Advisor scan (best-effort).
 
         Uses ``SYNO.Core.SecurityScan.Operation`` ``start`` with
-        ``items='"ALL"'`` (a JSON-encoded string) — exactly what the DSM
+        ``items='"ALL"'`` (a JSON-encoded string) - exactly what the DSM
         Security Advisor "Scan" button sends. Both pieces matter:
 
         - The previously used ``SYNO.Core.SecurityScan.Status`` ``system_scan``

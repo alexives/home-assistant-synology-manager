@@ -2,18 +2,18 @@
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=alexives&repository=home-assistant-synology-manager&category=integration)
 
-A Home Assistant custom integration for managing packages on Synology NAS devices — update entities for DSM firmware, installed packages, and Docker containers, plus switch entities for Docker compose project control.
+A Home Assistant custom integration for managing packages on Synology NAS devices - update entities for DSM firmware, installed packages, and Docker containers, plus switch entities for Docker compose project control.
 
 > [!NOTE]
 > This integration was almost entirely AI-coded (Claude). It has automated tests and works against a real NAS, but it has not had a thorough line-by-line human review. Use at your own risk, review it before trusting it on your system, and please report any issues.
 
 ## Features
 
-- **DSM Firmware Updates** — see available DSM versions and trigger upgrades
-- **Package Updates** — track and install updates for all installed Synology packages
-- **Container Updates** — detect and apply Docker container image updates via Container Manager, with support for compose projects grouped as single entities
-- **Compose Project Switches** — start and stop Docker compose projects from Home Assistant
-- **Security Advisor Scan** — a button to trigger a Security Advisor scan on demand (also run automatically after a package upgrade)
+- **DSM Firmware Updates** - see available DSM versions and trigger upgrades
+- **Package Updates** - track and install updates for all installed Synology packages
+- **Container Updates** - detect and apply Docker container image updates via Container Manager, with support for compose projects grouped as single entities
+- **Compose Project Switches** - start and stop Docker compose projects from Home Assistant
+- **Security Advisor Scan** - a button to trigger a Security Advisor scan on demand (also run automatically after a package upgrade)
 
 ## Installation
 
@@ -45,22 +45,21 @@ The integration is configured via the UI. You'll need:
 
 ## Container image pulls (ghcr.io / lscr.io)
 
-During a container update this integration pulls **Docker Hub** images automatically,
-then rebuilds the compose project. It does **not** pull `ghcr.io` / `lscr.io` images
-itself (those registries often need auth or hit rate limits, and pulls are better
-managed on the NAS) — for those it just rebuilds from whatever image is already on
-disk, so a newer one only gets applied if it has already been pulled. Set up two
-**Synology Task Scheduler** tasks (Control Panel → Task Scheduler → Create → Scheduled
-Task → User-defined script, run as `root`, e.g. daily) to keep those images current:
+Synology doesn't detect updates for `ghcr.io` / `lscr.io` images itself, so for those
+it just rebuilds from whatever image is already on disk, so a newer one only gets
+applied if it has already been pulled. If you use those registries, the easiest fix is
+to set up a couple of **Synology Task Scheduler** tasks (Control Panel → Task Scheduler
+→ Create → Scheduled Task → User-defined script, run as `root`, e.g. daily) to keep
+those images current without filling up the disk:
 
-**Pull task** — pull the latest image for every running compose-project container on
+**Pull task** - pull the latest image for every running compose-project container on
 those registries:
 
 ```sh
 docker ps --filter "label=com.docker.compose.project" --format '{{.Image}}' | grep -E '^(ghcr\.io|lscr\.io)/' | sort -u | xargs -I{} docker pull {}
 ```
 
-**Cleanup task** — keep the 4 newest images per repository and remove older ones
+**Cleanup task** - keep the 4 newest images per repository and remove older ones
 (prevents disk filling up with superseded images):
 
 ```sh
