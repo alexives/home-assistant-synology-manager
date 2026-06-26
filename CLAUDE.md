@@ -88,7 +88,16 @@ A release bundles one or more merged PRs.
 
 1. Bump `version` in `custom_components/synology_manager/manifest.json`
 2. Bump `version` in `pyproject.toml`
-3. `gh release create v<version> --target main` - release notes are a **one-sentence summary of each PR** in the release, nothing more (the detail lives in the PRs). This creates the tag.
+3. `gh release create v<version> --target main` - this creates the tag. Group the
+   notes under these category headings (omit any with no entries), one short bullet
+   per PR with its `(#N)` link; the detail lives in the PRs:
+   - `## ⚠️ Breaking Changes`
+   - `## 🆕 Enhancements`
+   - `## ✅ Bug Fixes`
+   - `## ⚓ Code Quality`
+   - `## 📝 Documentation`
+   - `## 📦 Dependencies`
+   - `## 🧹 Housekeeping`
 
 ## Conventions
 
