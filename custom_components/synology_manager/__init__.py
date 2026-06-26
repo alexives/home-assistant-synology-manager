@@ -25,7 +25,7 @@ from .const import (
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import SynologyAuthenticationError, SynologyClient, SynologyConnectionError
 
-PLATFORMS = (Platform.SWITCH, Platform.UPDATE)
+PLATFORMS = (Platform.BUTTON, Platform.SWITCH, Platform.UPDATE)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 

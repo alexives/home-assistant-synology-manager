@@ -227,7 +227,10 @@ class SynologyClient:
         """
         try:
             result = self._compound_request(
-                "SYNO.Core.Package", "list", 2, self._sysinfo.session,
+                "SYNO.Core.Package",
+                "list",
+                2,
+                self._sysinfo.session,
                 params={"additional": ["status", "startable"]},
             )
             return {
@@ -439,7 +442,9 @@ class SynologyClient:
             self.reconnect()
             return getattr(self._docker, method_name)(*args, **kwargs)
 
-    def _compound_request(self, api: str, method: str, version: int, session, params: dict | None = None) -> dict:
+    def _compound_request(
+        self, api: str, method: str, version: int, session, params: dict | None = None
+    ) -> dict:
         """Send a request via the SYNO.Entry.Request compound API wrapper.
 
         APIs with requestFormat=JSON only work through this wrapper,
@@ -638,15 +643,27 @@ class SynologyClient:
         _LOGGER.warning("Package %s upgrade did not complete within timeout", package_id)
 
     def trigger_security_scan(self) -> None:
-        """Trigger a Security Advisor scan (best-effort)."""
+        """Trigger a Security Advisor scan (best-effort).
+
+        Uses ``SYNO.Core.SecurityScan.Operation`` ``start`` with
+        ``items='"ALL"'`` (a JSON-encoded string) — exactly what the DSM
+        Security Advisor "Scan" button sends. Both pieces matter:
+
+        - The previously used ``SYNO.Core.SecurityScan.Status`` ``system_scan``
+          does not exist on DSM 7 (returns error 103), so the scan never ran.
+        - ``start`` without the ``items`` parameter returns error 1300.
+
+        Failures are logged at WARNING rather than silently swallowed so a real
+        problem is visible instead of disappearing.
+        """
         try:
             self._sysinfo.request_data(
-                "SYNO.Core.SecurityScan.Status",
+                "SYNO.Core.SecurityScan.Operation",
                 "entry.cgi",
-                req_param={"method": "system_scan", "version": 1},
+                req_param={"method": "start", "version": 1, "items": '"ALL"'},
             )
-        except Exception:
-            _LOGGER.debug("Security scan trigger failed", exc_info=True)
+        except Exception as err:
+            _LOGGER.warning("Security scan trigger failed: %s", err)
 
     def reconnect(self) -> None:
         """Re-authenticate and rebuild every API wrapper (best-effort).
