@@ -2,7 +2,7 @@
 
 ## What this is
 
-A Home Assistant custom integration for Synology NAS devices — update entities for DSM firmware, installed packages, and Docker containers (with install support), plus switch entities for Docker compose project control.
+A Home Assistant custom integration for managing packages on Synology NAS devices — update entities for DSM firmware, installed packages, and Docker containers, plus switch entities for Docker compose project control.
 
 ## Architecture
 
