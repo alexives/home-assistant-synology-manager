@@ -645,20 +645,22 @@ class SynologyClient:
     def trigger_security_scan(self) -> None:
         """Trigger a Security Advisor scan (best-effort).
 
-        Uses ``SYNO.Core.SecurityScan.Operation`` ``start`` — the only scan
-        trigger DSM 7 actually exposes (and what the library/Package Center use).
-        The previously used ``SYNO.Core.SecurityScan.Status`` ``system_scan``
-        does not exist on DSM 7 (returns error 103), so the scan never ran.
+        Uses ``SYNO.Core.SecurityScan.Operation`` ``start`` with
+        ``items='"ALL"'`` (a JSON-encoded string) — exactly what the DSM
+        Security Advisor "Scan" button sends. Both pieces matter:
 
-        Failures are logged at WARNING rather than silently swallowed: DSM
-        returns error 1300 when nothing has changed since the last scan, so a
-        visible log is the only way to tell a no-op from a real problem.
+        - The previously used ``SYNO.Core.SecurityScan.Status`` ``system_scan``
+          does not exist on DSM 7 (returns error 103), so the scan never ran.
+        - ``start`` without the ``items`` parameter returns error 1300.
+
+        Failures are logged at WARNING rather than silently swallowed so a real
+        problem is visible instead of disappearing.
         """
         try:
             self._sysinfo.request_data(
                 "SYNO.Core.SecurityScan.Operation",
                 "entry.cgi",
-                req_param={"method": "start", "version": 1},
+                req_param={"method": "start", "version": 1, "items": '"ALL"'},
             )
         except Exception as err:
             _LOGGER.warning("Security scan trigger failed: %s", err)

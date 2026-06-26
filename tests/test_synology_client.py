@@ -1408,7 +1408,9 @@ class TestTriggerSecurityScan:
         """The trigger must call SYNO.Core.SecurityScan.Operation 'start'.
 
         The old SYNO.Core.SecurityScan.Status 'system_scan' method does not
-        exist on DSM 7 (error 103), so the scan never actually ran.
+        exist on DSM 7 (error 103), so the scan never actually ran. The 'start'
+        method also requires items='"ALL"' (a JSON-encoded string, matching what
+        the DSM Security Advisor UI sends); without it DSM returns error 1300.
         """
         client = self._make_client()
 
@@ -1419,6 +1421,7 @@ class TestTriggerSecurityScan:
         assert args[0] == "SYNO.Core.SecurityScan.Operation"
         req_param = kwargs.get("req_param", args[2] if len(args) > 2 else {})
         assert req_param["method"] == "start"
+        assert req_param["items"] == '"ALL"'
 
     def test_trigger_logs_failure_instead_of_silently_swallowing(self, caplog):
         """A failed scan trigger must be surfaced in the logs, not hidden."""
