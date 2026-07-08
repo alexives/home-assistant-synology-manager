@@ -576,11 +576,49 @@ class SynologyClient:
         )
 
     def upgrade_dsm(self) -> None:
-        """Trigger DSM firmware download and install."""
+        """Download the pending DSM update, then trigger the install.
+
+        Mirrors what DSM's own Update & Restore UI sends (captured from
+        admin_center.js on DSM 7.3.2): start the download via
+        SYNO.Core.Upgrade.Server.Download (target "update"), poll its
+        progress until "finished", then fire SYNO.Core.Upgrade start with
+        force=true and type "server". The install reboots the NAS. These
+        write methods reject GET (error 101), so they go out as POST.
+        """
+        import time
+
         self._sysinfo.request_data(
-            "SYNO.Core.Upgrade.Server",
+            "SYNO.Core.Upgrade.Server.Download",
             "entry.cgi",
-            req_param={"method": "download", "version": 2},
+            req_param={
+                "method": "start",
+                "version": 2,
+                "target": "update",
+                "need_auto_smallupdate": True,
+            },
+            method="post",
+        )
+
+        for _ in range(240):
+            progress = self._sysinfo.request_data(
+                "SYNO.Core.Upgrade.Server.Download",
+                "entry.cgi",
+                req_param={"method": "progress", "version": 2, "need_download_target": True},
+            )
+            status = progress.get("data", {}).get("status", "")
+            if status == "finished":
+                break
+            if status in ("failed", "stopped"):
+                raise RuntimeError(f"DSM update download {status}")
+            time.sleep(5)
+        else:
+            raise RuntimeError("DSM update download did not finish within timeout")
+
+        self._sysinfo.request_data(
+            "SYNO.Core.Upgrade",
+            "entry.cgi",
+            req_param={"method": "start", "version": 1, "force": True, "type": "server"},
+            method="post",
         )
 
     def upgrade_package(self, package_id: str) -> None:
