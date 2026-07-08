@@ -209,15 +209,27 @@ class SynologyClient:
             self._docker = None
 
     def get_dsm_update(self) -> DsmUpdateInfo:
-        """Check for DSM firmware updates."""
+        """Check for DSM firmware updates.
+
+        On DSM 7 the upgrade check nests its payload under ``data.update``
+        (e.g. ``{"update": {"available": true, "version": "DSM 7.3.2-86009
+        Update 4", ...}}``) and does not include the installed version, which
+        comes from a separate SYNO.DSM.Info getinfo call (``version_string``).
+        """
         info = self._sysinfo.sys_upgrade_check()
-        data = info.get("data", {})
-        available = data.get("available", False)
+        update = info.get("data", {}).get("update", {})
+        available = update.get("available", False)
+        dsm_info = self._sysinfo.request_data(
+            "SYNO.DSM.Info",
+            "entry.cgi",
+            req_param={"method": "getinfo", "version": 2},
+        )
+        installed = dsm_info.get("data", {}).get("version_string", "")
         return DsmUpdateInfo(
-            installed_version=data.get("firmware_version", ""),
-            latest_version=data.get("version", None) if available else None,
+            installed_version=installed,
+            latest_version=update.get("version", None) if available else None,
             update_available=available,
-            release_notes=data.get("release_note", None),
+            release_notes=update.get("release_note", None),
         )
 
     def _get_package_status(self) -> dict[str, dict[str, Any]]:

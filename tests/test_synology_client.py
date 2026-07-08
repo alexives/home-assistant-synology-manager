@@ -85,14 +85,40 @@ class TestDsmUpdate:
     @patch("custom_components.synology_manager.synology_client.Package")
     @patch("custom_components.synology_manager.synology_client.DockerApi")
     def test_get_dsm_update_available(self, mock_docker, mock_package, mock_sysinfo):
-        """Test parsing DSM update when one is available."""
+        """Test parsing DSM update when one is available.
+
+        Response shapes captured from a live DSM 7.3.2 NAS: the upgrade check
+        nests everything under data.update, and the installed version comes
+        from a separate SYNO.DSM.Info getinfo call.
+        """
         mock_instance = MagicMock()
         mock_instance.sys_upgrade_check.return_value = {
             "data": {
-                "available": True,
-                "firmware_version": "7.2.1-69057",
-                "version": "7.2.2-72806",
-                "release_note": "Bug fixes and improvements",
+                "update": {
+                    "available": True,
+                    "reboot": "now",
+                    "restart": "some",
+                    "rss_result": "success",
+                    "type": "nano",
+                    "version": "DSM 7.3.2-86009 Update 4",
+                    "version_details": {
+                        "buildnumber": 86009,
+                        "isSecurityVersion": True,
+                        "major": 7,
+                        "micro": 2,
+                        "minor": 3,
+                        "nano": 4,
+                        "os_name": "DSM",
+                    },
+                },
+            },
+            "success": True,
+        }
+        mock_instance.request_data.return_value = {
+            "data": {
+                "model": "DS920+",
+                "version": "86009",
+                "version_string": "DSM 7.3.2-86009 Update 3",
             },
             "success": True,
         }
@@ -109,10 +135,9 @@ class TestDsmUpdate:
         client.connect()
         result = client.get_dsm_update()
 
-        assert result.installed_version == "7.2.1-69057"
-        assert result.latest_version == "7.2.2-72806"
+        assert result.installed_version == "DSM 7.3.2-86009 Update 3"
+        assert result.latest_version == "DSM 7.3.2-86009 Update 4"
         assert result.update_available is True
-        assert result.release_notes == "Bug fixes and improvements"
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -122,8 +147,17 @@ class TestDsmUpdate:
         mock_instance = MagicMock()
         mock_instance.sys_upgrade_check.return_value = {
             "data": {
-                "available": False,
-                "firmware_version": "7.2.2-72806",
+                "update": {
+                    "available": False,
+                },
+            },
+            "success": True,
+        }
+        mock_instance.request_data.return_value = {
+            "data": {
+                "model": "DS920+",
+                "version": "86009",
+                "version_string": "DSM 7.3.2-86009 Update 4",
             },
             "success": True,
         }
@@ -140,7 +174,7 @@ class TestDsmUpdate:
         client.connect()
         result = client.get_dsm_update()
 
-        assert result.installed_version == "7.2.2-72806"
+        assert result.installed_version == "DSM 7.3.2-86009 Update 4"
         assert result.latest_version is None
         assert result.update_available is False
 
