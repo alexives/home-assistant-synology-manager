@@ -250,6 +250,33 @@ class TestUpgradeDsm:
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
     @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_reconnects_first(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """The install path must refresh the shared session before starting.
+
+        The coordinator polls every 6 hours, so by the time the user clicks
+        Install the SID is often stale (error 106 "Session timeout") - same
+        reason update_container/update_project reconnect first.
+        """
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                {"success": True},
+            ],
+        )
+        assert mock_sysinfo.call_count == 1
+
+        client.upgrade_dsm()
+
+        assert mock_sysinfo.call_count == 2
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
     def test_upgrade_dsm_download_failure_raises(
         self, mock_docker, mock_package, mock_sysinfo, mock_sleep
     ):
@@ -1515,6 +1542,18 @@ class TestPackageUpgrade:
         with pytest.raises(RuntimeError):
             client.upgrade_package("HybridShare")
         pkg.install_package.assert_not_called()
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_reconnects_first(self, mock_docker, mock_package_cls, mock_sysinfo_cls):
+        """The install path must refresh the shared session before starting."""
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        assert mock_package_cls.call_count == 1
+
+        client.upgrade_package("HybridShare")
+
+        assert mock_package_cls.call_count == 2
 
 
 class TestTriggerSecurityScan:
