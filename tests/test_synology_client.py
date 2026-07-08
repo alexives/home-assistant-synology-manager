@@ -179,6 +179,98 @@ class TestDsmUpdate:
         assert result.update_available is False
 
 
+class TestUpgradeDsm:
+    """Tests for triggering a DSM upgrade.
+
+    Request params mirror what DSM 7.3.2's own Update & Restore UI sends
+    (captured from admin_center.js on a live DS920+).
+    """
+
+    def _client(self, mock_sysinfo, request_data_side_effect):
+        mock_instance = MagicMock()
+        mock_instance.request_data.side_effect = request_data_side_effect
+        mock_sysinfo.return_value = mock_instance
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+        return client, mock_instance
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_downloads_then_installs(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """Test the full download -> poll -> install sequence."""
+        client, mock_instance = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "downloading", "percent": 42}, "success": True},
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                {"success": True},  # Upgrade start
+            ],
+        )
+
+        client.upgrade_dsm()
+
+        calls = mock_instance.request_data.call_args_list
+        assert calls[0].args[0] == "SYNO.Core.Upgrade.Server.Download"
+        assert calls[0].kwargs["req_param"] == {
+            "method": "start",
+            "version": 2,
+            "target": "update",
+            "need_auto_smallupdate": True,
+        }
+        assert calls[0].kwargs["method"] == "post"
+        assert calls[1].args[0] == "SYNO.Core.Upgrade.Server.Download"
+        assert calls[1].kwargs["req_param"] == {
+            "method": "progress",
+            "version": 2,
+            "need_download_target": True,
+        }
+        assert calls[3].args[0] == "SYNO.Core.Upgrade"
+        assert calls[3].kwargs["req_param"] == {
+            "method": "start",
+            "version": 1,
+            "force": True,
+            "type": "server",
+        }
+        assert calls[3].kwargs["method"] == "post"
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_download_failure_raises(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """Test that a failed download aborts without triggering the install."""
+        client, mock_instance = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "failed", "percent": 0}, "success": True},
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="failed"):
+            client.upgrade_dsm()
+
+        installs = [
+            c for c in mock_instance.request_data.call_args_list if c.args[0] == "SYNO.Core.Upgrade"
+        ]
+        assert installs == []
+
+
 class TestPackages:
     """Tests for package listing."""
 
