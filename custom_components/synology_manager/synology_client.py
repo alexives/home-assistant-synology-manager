@@ -584,9 +584,13 @@ class SynologyClient:
         progress until "finished", then fire SYNO.Core.Upgrade start with
         force=true and type "server". The install reboots the NAS. These
         write methods reject GET (error 101), so they go out as POST.
+
+        Reconnects first: the coordinator only polls every 6 hours, so the
+        shared SID is often stale by the time the user clicks Install.
         """
         import time
 
+        self.reconnect()
         self._sysinfo.request_data(
             "SYNO.Core.Upgrade.Server.Download",
             "entry.cgi",
@@ -627,9 +631,13 @@ class SynologyClient:
         DSM requires the SPK to be downloaded first (which yields a task id),
         and the upgrade is then performed against that task id. Firing a bare
         ``install`` request with the URL is accepted but never actually upgrades.
+
+        Reconnects first: the shared SID is often stale by the time the user
+        clicks Install (the coordinator only polls every 6 hours).
         """
         import time
 
+        self.reconnect()
         response = self._package.list_installable()
         installable = response.get("data", {}).get("packages", [])
         pkg_info = next((p for p in installable if p.get("id") == package_id), None)
