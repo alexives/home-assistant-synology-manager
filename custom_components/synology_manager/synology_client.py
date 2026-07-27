@@ -625,12 +625,34 @@ class SynologyClient:
             method="post",
         )
 
+    def _installation_request(self, package_id: str, step: str, params: dict) -> dict:
+        """Call ``SYNO.Core.Package.Installation``, surfacing the DSM error code.
+
+        The library maps reserved DSM error codes (112-149) to the placeholder
+        text "Preserve for other purpose" and drops the number, so re-raise
+        with the step name and numeric code to keep failures diagnosable.
+        Library exceptions may stringify to "" (the text lives in
+        ``error_message``), so never rely on ``str(err)`` alone.
+        """
+        try:
+            return self._package.request_data(
+                "SYNO.Core.Package.Installation", "entry.cgi", dict(params)
+            )
+        except Exception as err:
+            detail = getattr(err, "error_message", None) or str(err) or type(err).__name__
+            code = getattr(err, "error_code", None)
+            if code is not None:
+                detail = f"DSM error {code}: {detail}"
+            _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
+            raise RuntimeError(f"Package {package_id} {step} failed: {detail}") from err
+
     def upgrade_package(self, package_id: str) -> None:
         """Upgrade a package via the DSM download-then-upgrade flow.
 
-        DSM requires the SPK to be downloaded first (which yields a task id),
-        and the upgrade is then performed against that task id. Firing a bare
-        ``install`` request with the URL is accepted but never actually upgrades.
+        Both write requests use method ``upgrade``: DSM 7.3.2 rejects method
+        ``install`` for an already-installed package with reserved error 120.
+        The requests mirror what Package Center's ``_onRequestDownload`` and
+        ``_onRequestQuickInstall`` send (captured from PkgManApp.js).
 
         Reconnects first: the shared SID is often stale by the time the user
         clicks Install (the coordinator only polls every 6 hours).
@@ -645,14 +667,27 @@ class SynologyClient:
             raise RuntimeError(f"Package {package_id} not found in installable list")
 
         target_ver = pkg_info.get("version", "")
+        is_syno = pkg_info.get("source") == "syno"
+        beta = bool(pkg_info.get("beta", False))
         _LOGGER.debug("Upgrading package %s to %s", package_id, target_ver)
 
         # Step 1: download the SPK to the NAS; this returns a task id.
-        download = self._package.download_package(
-            pkg_info.get("link", ""),
+        download = self._installation_request(
             package_id,
-            pkg_info.get("md5", ""),
-            pkg_info.get("size", 0),
+            "download",
+            {
+                "method": "upgrade",
+                "version": 1,
+                "operation": "upgrade",
+                "name": package_id,
+                "url": pkg_info.get("link", ""),
+                "checksum": pkg_info.get("md5", ""),
+                "filesize": pkg_info.get("size", 0),
+                "type": pkg_info.get("type", 0),
+                "blqinst": False,
+                "is_syno": is_syno,
+                "beta": beta,
+            },
         )
         task_id = download.get("data", {}).get("taskid", "")
         if not task_id:
@@ -669,25 +704,25 @@ class SynologyClient:
         else:
             raise RuntimeError(f"Package {package_id} download did not finish within timeout")
 
-        # Step 3: resolve the downloaded file path and target volume.
-        downloaded = self._package.check_installation_from_download(task_id)
-        file_path = downloaded.get("data", {}).get("filename", "")
-        if not file_path:
-            raise RuntimeError(f"Package {package_id} downloaded file path not found")
+        # Step 3: resolve the target volume.
         volume_path = (
             self._package.check_installation(package_id).get("data", {}).get("volume_path", "")
         )
 
-        # Step 4: install the downloaded package with force to upgrade in place.
-        # (The library's `upgrade` method returns error 4501 for system packages;
-        # the compound check+install flow is what Package Center actually uses.)
-        self._package.install_package(
+        # Step 4: install the downloaded package via the quick-upgrade request.
+        self._installation_request(
             package_id,
-            volume_path,
-            file_path,
-            check_codesign=False,
-            force=True,
-            installrunpackage=True,
+            "install",
+            {
+                "method": "upgrade",
+                "version": 1,
+                "name": package_id,
+                "blqinst": True,
+                "volume_path": volume_path,
+                "is_syno": is_syno,
+                "beta": beta,
+                "installrunpackage": True,
+            },
         )
 
         # Step 5: confirm the installed version reaches the target.
