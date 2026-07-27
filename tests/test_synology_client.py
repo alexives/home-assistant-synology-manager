@@ -1516,7 +1516,9 @@ class TestPackageUpgrade:
 
         client.upgrade_package("HybridShare")
 
-        download_params = pkg.request_data.call_args_list[0].args[2]
+        download_call = pkg.request_data.call_args_list[0]
+        assert download_call.args[0] == "SYNO.Core.Package.Installation"
+        download_params = download_call.args[2]
         assert download_params["method"] == "upgrade"
         assert download_params["operation"] == "upgrade"
         assert download_params["name"] == "HybridShare"
@@ -1540,7 +1542,9 @@ class TestPackageUpgrade:
         client.upgrade_package("HybridShare")
 
         assert pkg.request_data.call_count == 2
-        install_params = pkg.request_data.call_args_list[1].args[2]
+        install_call = pkg.request_data.call_args_list[1]
+        assert install_call.args[0] == "SYNO.Core.Package.Installation"
+        install_params = install_call.args[2]
         assert install_params["method"] == "upgrade"
         assert install_params["name"] == "HybridShare"
         assert install_params["blqinst"] is True
@@ -1569,14 +1573,31 @@ class TestPackageUpgrade:
         """API failures must report the step and numeric DSM error code.
 
         The library maps reserved DSM codes (112-149) to the placeholder text
-        "Preserve for other purpose" and drops the number.
+        "Preserve for other purpose" and drops the number. Its exceptions can
+        stringify to "" (the text lives in .error_message), so mimic that.
         """
         client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        err = Exception("Preserve for other purpose")
+        err = Exception()
         err.error_code = 120
+        err.error_message = "Preserve for other purpose"
         pkg.request_data.side_effect = err
 
-        with pytest.raises(RuntimeError, match=r"download.*DSM error 120"):
+        with pytest.raises(
+            RuntimeError, match=r"download failed: DSM error 120: Preserve for other purpose"
+        ):
+            client.upgrade_package("HybridShare")
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_error_without_code_is_still_descriptive(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Errors lacking error_code/error_message must not produce an empty detail."""
+        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        pkg.request_data.side_effect = ConnectionResetError()
+
+        with pytest.raises(RuntimeError, match=r"download failed: ConnectionResetError"):
             client.upgrade_package("HybridShare")
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")

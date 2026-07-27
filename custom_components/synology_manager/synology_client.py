@@ -631,16 +631,20 @@ class SynologyClient:
         The library maps reserved DSM error codes (112-149) to the placeholder
         text "Preserve for other purpose" and drops the number, so re-raise
         with the step name and numeric code to keep failures diagnosable.
+        Library exceptions may stringify to "" (the text lives in
+        ``error_message``), so never rely on ``str(err)`` alone.
         """
         try:
             return self._package.request_data(
                 "SYNO.Core.Package.Installation", "entry.cgi", dict(params)
             )
         except Exception as err:
+            detail = getattr(err, "error_message", None) or str(err) or type(err).__name__
             code = getattr(err, "error_code", None)
-            detail = f"DSM error {code}" if code is not None else str(err)
-            _LOGGER.warning("Package %s %s failed: %s (%s)", package_id, step, detail, err)
-            raise RuntimeError(f"Package {package_id} {step} failed: {detail} ({err})") from err
+            if code is not None:
+                detail = f"DSM error {code}: {detail}"
+            _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
+            raise RuntimeError(f"Package {package_id} {step} failed: {detail}") from err
 
     def upgrade_package(self, package_id: str) -> None:
         """Upgrade a package via the DSM download-then-upgrade flow.
