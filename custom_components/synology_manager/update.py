@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
@@ -12,6 +13,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -160,7 +163,13 @@ class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         await self.hass.async_add_executor_job(
             self.coordinator.client.upgrade_package, self._package_id
         )
-        await self.hass.async_add_executor_job(self.coordinator.client.trigger_security_scan)
+        # Best-effort: a failed scan must not report a successful upgrade as failed.
+        try:
+            await self.hass.async_add_executor_job(self.coordinator.client.trigger_security_scan)
+        except Exception:
+            _LOGGER.warning(
+                "Post-upgrade security scan failed for %s", self._package_id, exc_info=True
+            )
         await self.coordinator.async_request_refresh()
 
 
