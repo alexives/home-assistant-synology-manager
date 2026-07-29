@@ -180,6 +180,27 @@ class TestPackageUpdateEntity:
         assert calls[0].args[1] == "HyperBackup"
         assert calls[1].args[0] == mock_coordinator.client.trigger_security_scan
 
+    @pytest.mark.asyncio
+    async def test_install_succeeds_even_if_security_scan_fails(self, mock_coordinator, caplog):
+        """A failed post-upgrade scan must not report a successful upgrade as failed."""
+        import logging
+
+        pkg = mock_coordinator.data["packages"][0]
+        entity = SynologyPackageUpdateEntity(mock_coordinator, pkg.package_id)
+        entity.hass = MagicMock()
+
+        async def _executor(func, *args):
+            if func == mock_coordinator.client.trigger_security_scan:
+                raise RuntimeError("Security scan start failed: DSM error 119")
+            return None
+
+        entity.hass.async_add_executor_job = AsyncMock(side_effect=_executor)
+
+        with caplog.at_level(logging.WARNING):
+            await entity.async_install(version=None, backup=None)  # must not raise
+
+        assert any("scan" in r.message.lower() for r in caplog.records)
+
 
 class TestContainerUpdateEntity:
     """Tests for the standalone container update entity."""

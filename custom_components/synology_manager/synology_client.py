@@ -88,6 +88,20 @@ class ProjectUpdateInfo:
     images: list[str]
 
 
+def _err_detail(err: Exception) -> str:
+    """Extract a diagnosable message from any exception.
+
+    synology-api exceptions can stringify to "" (the text lives in
+    ``error_message``) and map reserved DSM error codes (112-149) to the
+    placeholder "Preserve for other purpose", so include the numeric code.
+    """
+    detail = getattr(err, "error_message", None) or str(err) or type(err).__name__
+    code = getattr(err, "error_code", None)
+    if code is not None:
+        detail = f"DSM error {code}: {detail}"
+    return detail
+
+
 def _prettify(name: str) -> str:
     """Convert a container/project name to a human-readable title."""
     return name.replace("-", " ").replace("_", " ").title()
@@ -639,10 +653,7 @@ class SynologyClient:
                 "SYNO.Core.Package.Installation", "entry.cgi", dict(params)
             )
         except Exception as err:
-            detail = getattr(err, "error_message", None) or str(err) or type(err).__name__
-            code = getattr(err, "error_code", None)
-            if code is not None:
-                detail = f"DSM error {code}: {detail}"
+            detail = _err_detail(err)
             _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
             raise RuntimeError(f"Package {package_id} {step} failed: {detail}") from err
 
@@ -736,27 +747,46 @@ class SynologyClient:
         _LOGGER.warning("Package %s upgrade did not complete within timeout", package_id)
 
     def trigger_security_scan(self) -> None:
-        """Trigger a Security Advisor scan (best-effort).
+        """Trigger a Security Advisor scan.
 
         Uses ``SYNO.Core.SecurityScan.Operation`` ``start`` with
         ``items='"ALL"'`` (a JSON-encoded string) - exactly what the DSM
-        Security Advisor "Scan" button sends. Both pieces matter:
+        Security Advisor "Scan" button sends (``doScan`` in
+        ``synosecurityscan.js``). Both pieces matter:
 
         - The previously used ``SYNO.Core.SecurityScan.Status`` ``system_scan``
           does not exist on DSM 7 (returns error 103), so the scan never ran.
+          (The status method the UI polls is ``system_get``.)
         - ``start`` without the ``items`` parameter returns error 1300.
 
-        Failures are logged at WARNING rather than silently swallowed so a real
-        problem is visible instead of disappearing.
+        The shared SID is usually stale by the time the button is pressed
+        (the coordinator only polls every 6 hours) and DSM then rejects the
+        call with error 119, so retry once on a fresh session. Raises on
+        final failure so callers can surface it; the post-upgrade caller
+        treats it as best-effort instead.
         """
-        try:
+
+        def _start() -> None:
             self._sysinfo.request_data(
                 "SYNO.Core.SecurityScan.Operation",
                 "entry.cgi",
                 req_param={"method": "start", "version": 1, "items": '"ALL"'},
             )
-        except Exception as err:
-            _LOGGER.warning("Security scan trigger failed: %s", err)
+
+        try:
+            _start()
+        except Exception as first_err:
+            _LOGGER.debug(
+                "Security scan start failed (%s), reconnecting and retrying",
+                _err_detail(first_err),
+            )
+            self.reconnect()
+            try:
+                _start()
+            except Exception as err:
+                detail = _err_detail(err)
+                _LOGGER.warning("Security scan start failed after reconnect: %s", detail)
+                raise RuntimeError(f"Security scan start failed: {detail}") from err
 
     def reconnect(self) -> None:
         """Re-authenticate and rebuild every API wrapper (best-effort).

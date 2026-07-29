@@ -1645,14 +1645,35 @@ class TestTriggerSecurityScan:
         assert req_param["method"] == "start"
         assert req_param["items"] == '"ALL"'
 
-    def test_trigger_logs_failure_instead_of_silently_swallowing(self, caplog):
-        """A failed scan trigger must be surfaced in the logs, not hidden."""
-        import logging
+    def test_trigger_retries_after_reconnect_on_stale_session(self):
+        """A stale SID (DSM error 119) must not silently no-op the scan.
 
+        The coordinator only polls every 6 hours, so the shared session is
+        usually stale by the time the button is pressed. Every other write
+        path refreshes the session; this one silently dropped the scan.
+        """
         client = self._make_client()
-        client._sysinfo.request_data.side_effect = RuntimeError("Core Error: 1300")
+        stale = RuntimeError("Invalid session / SID not found.")
+        client._sysinfo.request_data.side_effect = [stale, {"success": True}]
+        client.reconnect = MagicMock()
 
-        with caplog.at_level(logging.WARNING):
-            client.trigger_security_scan()  # must not raise
+        client.trigger_security_scan()
 
-        assert any("1300" in r.message or "scan" in r.message.lower() for r in caplog.records)
+        client.reconnect.assert_called_once()
+        assert client._sysinfo.request_data.call_count == 2
+
+    def test_trigger_raises_when_retry_also_fails(self):
+        """A scan that still fails after reconnect must raise, not vanish.
+
+        The exception detail must survive even when the library exception
+        stringifies to "" (the text lives in ``error_message``).
+        """
+        client = self._make_client()
+        err = Exception("")
+        err.error_message = "Core Error: 1300"
+        err.error_code = 1300
+        client._sysinfo.request_data.side_effect = err
+        client.reconnect = MagicMock()
+
+        with pytest.raises(RuntimeError, match=r"DSM error 1300: Core Error: 1300"):
+            client.trigger_security_scan()
