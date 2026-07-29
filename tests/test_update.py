@@ -201,6 +201,28 @@ class TestPackageUpdateEntity:
 
         assert any("scan" in r.message.lower() for r in caplog.records)
 
+    @pytest.mark.asyncio
+    async def test_install_failure_surfaces_as_popup_and_notification(self, mock_coordinator):
+        """A failed upgrade must raise HomeAssistantError and notify with a log link."""
+        from unittest.mock import patch
+
+        from homeassistant.exceptions import HomeAssistantError
+
+        pkg = mock_coordinator.data["packages"][0]
+        entity = SynologyPackageUpdateEntity(mock_coordinator, pkg.package_id)
+        entity.hass = MagicMock()
+        entity.hass.async_add_executor_job = AsyncMock(
+            side_effect=RuntimeError("Package HyperBackup install failed: DSM error 120")
+        )
+
+        with (
+            patch("custom_components.synology_manager.actions.persistent_notification") as mock_pn,
+            pytest.raises(HomeAssistantError, match="DSM error 120"),
+        ):
+            await entity.async_install(version=None, backup=None)
+
+        mock_pn.async_create.assert_called_once()
+
 
 class TestContainerUpdateEntity:
     """Tests for the standalone container update entity."""

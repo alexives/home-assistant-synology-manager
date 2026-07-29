@@ -7,7 +7,26 @@ import pytest
 from custom_components.synology_manager.synology_client import (
     SynologyAuthenticationError,
     SynologyClient,
+    _err_detail,
 )
+
+
+class TestErrDetail:
+    """Tests for the shared exception-detail extractor."""
+
+    def test_prefers_error_message_when_str_is_empty(self):
+        err = Exception("")
+        err.error_message = "Preserve for other purpose"
+        assert _err_detail(err) == "Preserve for other purpose"
+
+    def test_includes_numeric_dsm_error_code(self):
+        err = Exception("")
+        err.error_message = "Preserve for other purpose"
+        err.error_code = 120
+        assert _err_detail(err) == "DSM error 120: Preserve for other purpose"
+
+    def test_falls_back_to_type_name(self):
+        assert _err_detail(ValueError()) == "ValueError"
 
 
 class TestClientConstruction:
@@ -856,6 +875,28 @@ class TestContainers:
         assert len(containers) == 1
         assert containers[0].update_available is False
 
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_downloaded_images_failure_logs_warning(
+        self, mock_docker, mock_package, mock_sysinfo, caplog
+    ):
+        """Silently degraded update detection must be visible at default log level."""
+        import logging
+
+        mock_docker_inst = MagicMock()
+        mock_docker_inst.containers.return_value = {"data": {"containers": []}, "success": True}
+        mock_docker_inst.downloaded_images.side_effect = Exception("API error")
+        mock_docker.return_value = mock_docker_inst
+
+        client = SynologyClient(host="nas.local", port=5001, username="admin", password="secret")
+        client.connect()
+        with caplog.at_level(logging.WARNING):
+            client.get_containers()
+
+        record = next(r for r in caplog.records if "API error" in r.message)
+        assert record.levelno == logging.WARNING
+
 
 class TestProjects:
     """Tests for compose project listing."""
@@ -908,6 +949,27 @@ class TestProjects:
         rallly = next(p for p in projects if p.name == "rallly")
         assert rallly.project_id == "uuid-rallly-002"
         assert rallly.status == "RUNNING"
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_list_projects_failure_logs_warning(
+        self, mock_docker, mock_package, mock_sysinfo, caplog
+    ):
+        """A failed project listing must be visible at default log level."""
+        import logging
+
+        mock_docker_inst = MagicMock()
+        mock_docker_inst.list_projects.side_effect = Exception("Core Error: 119")
+        mock_docker.return_value = mock_docker_inst
+
+        client = SynologyClient(host="nas.local", port=5001, username="admin", password="secret")
+        client.connect()
+        with caplog.at_level(logging.WARNING):
+            assert client.get_projects() == []
+
+        record = next(r for r in caplog.records if "Core Error: 119" in r.message)
+        assert record.levelno == logging.WARNING
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
