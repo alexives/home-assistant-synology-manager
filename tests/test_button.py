@@ -38,3 +38,24 @@ class TestSecurityScanButton:
         entity.hass.async_add_executor_job.assert_called_once_with(
             mock_coordinator.client.trigger_security_scan
         )
+
+    @pytest.mark.asyncio
+    async def test_press_failure_surfaces_as_popup_and_notification(self, mock_coordinator):
+        """A failed scan must produce an error popup, not a silent no-op."""
+        from unittest.mock import patch
+
+        from homeassistant.exceptions import HomeAssistantError
+
+        entity = SynologySecurityScanButtonEntity(mock_coordinator)
+        entity.hass = MagicMock()
+        entity.hass.async_add_executor_job = AsyncMock(
+            side_effect=RuntimeError("Security scan start failed: DSM error 119")
+        )
+
+        with (
+            patch("custom_components.synology_manager.actions.persistent_notification") as mock_pn,
+            pytest.raises(HomeAssistantError, match="DSM error 119"),
+        ):
+            await entity.async_press()
+
+        mock_pn.async_create.assert_called_once()

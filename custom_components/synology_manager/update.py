@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .actions import run_action
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
 
@@ -103,7 +104,12 @@ class SynologyDSMUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], Upd
         return dsm.release_notes
 
     async def async_install(self, version: str | None, backup: bool | None, **kwargs: Any) -> None:
-        await self.hass.async_add_executor_job(self.coordinator.client.upgrade_dsm)
+        await run_action(
+            self.hass,
+            self.coordinator.config_entry.entry_id,
+            "Updating DSM",
+            self.coordinator.client.upgrade_dsm,
+        )
         await self.coordinator.async_request_refresh()
 
 
@@ -160,8 +166,12 @@ class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         return pkg.changelog
 
     async def async_install(self, version: str | None, backup: bool | None, **kwargs: Any) -> None:
-        await self.hass.async_add_executor_job(
-            self.coordinator.client.upgrade_package, self._package_id
+        await run_action(
+            self.hass,
+            self.coordinator.config_entry.entry_id,
+            f"Updating package {self.title}",
+            self.coordinator.client.upgrade_package,
+            self._package_id,
         )
         # Best-effort: a failed scan must not report a successful upgrade as failed.
         try:
@@ -229,8 +239,13 @@ class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         pu = self._get_project_update()
         if pu is None or pu.project_id is None:
             return
-        await self.hass.async_add_executor_job(
-            self.coordinator.client.update_project, pu.project_id, pu.images
+        await run_action(
+            self.hass,
+            self.coordinator.config_entry.entry_id,
+            f"Updating project {self.title}",
+            self.coordinator.client.update_project,
+            pu.project_id,
+            pu.images,
         )
         await self.coordinator.async_request_refresh()
 
@@ -282,7 +297,10 @@ class SynologyContainerUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator
         ctr = self._get_container()
         if ctr is None:
             return
-        await self.hass.async_add_executor_job(
+        await run_action(
+            self.hass,
+            self.coordinator.config_entry.entry_id,
+            f"Updating container {self.title}",
             self.coordinator.client.update_container,
             self._container_name,
             ctr.image,

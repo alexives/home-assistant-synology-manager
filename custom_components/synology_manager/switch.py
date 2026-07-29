@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .actions import run_action
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import PackageInfo, ProjectInfo
 
@@ -87,8 +88,12 @@ class SynologyPackageSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator],
         self._optimistic_state = True
         self.async_write_ha_state()
         try:
-            await self.hass.async_add_executor_job(
-                self.coordinator.client.start_package, self._package_id
+            await run_action(
+                self.hass,
+                self.coordinator.config_entry.entry_id,
+                f"Starting package {self._package_id}",
+                self.coordinator.client.start_package,
+                self._package_id,
             )
         finally:
             self._optimistic_state = None
@@ -98,8 +103,12 @@ class SynologyPackageSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator],
         self._optimistic_state = False
         self.async_write_ha_state()
         try:
-            await self.hass.async_add_executor_job(
-                self.coordinator.client.stop_package, self._package_id
+            await run_action(
+                self.hass,
+                self.coordinator.config_entry.entry_id,
+                f"Stopping package {self._package_id}",
+                self.coordinator.client.stop_package,
+                self._package_id,
             )
         finally:
             self._optimistic_state = None
@@ -141,8 +150,12 @@ class SynologyProjectSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator],
         self._optimistic_state = True
         self.async_write_ha_state()
         try:
-            await self.hass.async_add_executor_job(
-                self.coordinator.client.start_project, self._project_id
+            await run_action(
+                self.hass,
+                self.coordinator.config_entry.entry_id,
+                f"Starting project {self.name}",
+                self.coordinator.client.start_project,
+                self._project_id,
             )
         finally:
             self._optimistic_state = None
@@ -152,8 +165,12 @@ class SynologyProjectSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator],
         self._optimistic_state = False
         self.async_write_ha_state()
         try:
-            await self.hass.async_add_executor_job(
-                self.coordinator.client.stop_project, self._project_id
+            await run_action(
+                self.hass,
+                self.coordinator.config_entry.entry_id,
+                f"Stopping project {self.name}",
+                self.coordinator.client.stop_project,
+                self._project_id,
             )
         finally:
             self._optimistic_state = None

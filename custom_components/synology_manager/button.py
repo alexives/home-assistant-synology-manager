@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .actions import run_action
 from .coordinator import SynologyManagerCoordinator
 
 
@@ -31,4 +32,9 @@ class SynologySecurityScanButtonEntity(CoordinatorEntity[SynologyManagerCoordina
 
     async def async_press(self) -> None:
         """Trigger the Security Advisor scan."""
-        await self.hass.async_add_executor_job(self.coordinator.client.trigger_security_scan)
+        await run_action(
+            self.hass,
+            self.coordinator.config_entry.entry_id,
+            "Security Advisor scan",
+            self.coordinator.client.trigger_security_scan,
+        )

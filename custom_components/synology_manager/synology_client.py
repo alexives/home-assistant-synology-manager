@@ -218,8 +218,10 @@ class SynologyClient:
 
         try:
             self._docker = DockerApi(**kwargs)
-        except Exception:
-            _LOGGER.warning("Docker/Container Manager not available on this NAS")
+        except Exception as err:
+            _LOGGER.warning(
+                "Docker/Container Manager not available on this NAS: %s", _err_detail(err)
+            )
             self._docker = None
 
     def get_dsm_update(self) -> DsmUpdateInfo:
@@ -264,8 +266,12 @@ class SynologyClient:
                 for pkg in result.get("packages", [])
                 if isinstance(pkg, dict) and pkg.get("id")
             }
-        except Exception:
-            _LOGGER.debug("Package status fetch via compound API failed", exc_info=True)
+        except Exception as err:
+            _LOGGER.warning(
+                "Package status fetch failed, running/stopped state unavailable: %s",
+                _err_detail(err),
+                exc_info=True,
+            )
             return {}
 
     def get_packages(self) -> list[PackageInfo]:
@@ -332,8 +338,12 @@ class SynologyClient:
                         "upgradable": img.get("upgradable", False),
                         "image_id": image_id,
                     }
-        except Exception:
-            _LOGGER.debug("downloaded_images failed", exc_info=True)
+        except Exception as err:
+            _LOGGER.warning(
+                "downloaded_images failed, container update detection degraded: %s",
+                _err_detail(err),
+                exc_info=True,
+            )
 
         project_counts: dict[str, int] = {}
         parsed: list[tuple[dict, str, str]] = []
@@ -439,8 +449,12 @@ class SynologyClient:
 
         try:
             result = self._docker.list_projects()
-        except Exception:
-            _LOGGER.debug("list_projects failed", exc_info=True)
+        except Exception as err:
+            _LOGGER.warning(
+                "list_projects failed, no project entities this cycle: %s",
+                _err_detail(err),
+                exc_info=True,
+            )
             return []
 
         projects = []
@@ -557,16 +571,24 @@ class SynologyClient:
         """Start a compose project."""
         try:
             self._compound_project_request("start", {"id": project_id})
-        except Exception:
-            _LOGGER.debug("Compound start_project failed, falling back to container-level start")
+        except Exception as err:
+            _LOGGER.warning(
+                "Project start via SYNO.Docker.Project failed (%s), "
+                "falling back to container-level start",
+                _err_detail(err),
+            )
             self._container_fallback(project_id, "start")
 
     def stop_project(self, project_id: str) -> None:
         """Stop a compose project."""
         try:
             self._compound_project_request("stop", {"id": project_id})
-        except Exception:
-            _LOGGER.debug("Compound stop_project failed, falling back to container-level stop")
+        except Exception as err:
+            _LOGGER.warning(
+                "Project stop via SYNO.Docker.Project failed (%s), "
+                "falling back to container-level stop",
+                _err_detail(err),
+            )
             self._container_fallback(project_id, "stop")
 
     def start_package(self, package_id: str) -> None:
@@ -864,8 +886,13 @@ class SynologyClient:
                     "tag": tag,
                 },
             )
-        except Exception:
-            _LOGGER.debug("pull_start failed for %s:%s, image may already be on disk", repo, tag)
+        except Exception as err:
+            _LOGGER.warning(
+                "pull_start failed for %s:%s (%s), rebuilding with the image already on disk",
+                repo,
+                tag,
+                _err_detail(err),
+            )
             return
 
         task_id = result.get("data", {}).get("task_id", "")
@@ -885,12 +912,17 @@ class SynologyClient:
                 )
                 if status.get("data", {}).get("finished"):
                     return
-            except Exception:
-                pass
+            except Exception as err:
+                # WARNING here would fire every 2s for the whole poll window;
+                # the loop-exhaustion warning below is the visible signal.
+                _LOGGER.debug("pull_status poll failed for %s:%s: %s", repo, tag, _err_detail(err))
             time.sleep(2)
 
-        _LOGGER.debug(
-            "Image pull status tracking failed for %s:%s, proceeding with rebuild", repo, tag
+        _LOGGER.warning(
+            "Image pull for %s:%s did not report finished within timeout, "
+            "proceeding with rebuild anyway",
+            repo,
+            tag,
         )
 
     def _find_project_for_container(self, container_name: str) -> str | None:
