@@ -755,22 +755,51 @@ class SynologyClient:
         return not dsm.update_available
 
     def _installation_request(self, package_id: str, step: str, params: dict) -> dict:
-        """Call ``SYNO.Core.Package.Installation``, surfacing the DSM error code.
+        """POST a ``SYNO.Core.Package.Installation`` request, surfacing DSM errors.
 
-        The library maps reserved DSM error codes (112-149) to the placeholder
-        text "Preserve for other purpose" and drops the number, so re-raise
-        with the step name and numeric code to keep failures diagnosable.
-        Library exceptions may stringify to "" (the text lives in
-        ``error_message``), so never rely on ``str(err)`` alone.
+        Goes out raw rather than through the library, all verified live:
+        these writes need POST with the X-SYNO-TOKEN header (the library's
+        POST omits the token -> error 119; its GET trips method ``install``'s
+        stricter validation -> error 120), and every payload value must be
+        JSON-encoded (Python bools serialize to "True"/"False", which DSM
+        rejects with error 120 reason "type"; DSM's own UI JSON-stringifies
+        every non-string param). Raw responses also keep the error payload
+        the library drops - ``errors.name``/``reason`` say which param DSM
+        disliked, and reserved-range codes keep their number.
         """
+        import requests as req_lib
+
+        session = self._package.session
+        form: dict[str, Any] = {
+            "api": "SYNO.Core.Package.Installation",
+            "version": params.get("version", 1),
+            "method": params.get("method", ""),
+            "_sid": session._sid,
+        }
+        for key, value in params.items():
+            if key in ("version", "method"):
+                continue
+            form[key] = json.dumps(value)
+        scheme = "https" if self._secure else "http"
         try:
-            return self._package.request_data(
-                "SYNO.Core.Package.Installation", "entry.cgi", dict(params)
+            resp = req_lib.post(
+                f"{scheme}://{self._host}:{self._port}/webapi/entry.cgi",
+                data=form,
+                verify=self._verify_ssl,
+                headers={"X-SYNO-TOKEN": session._syno_token},
             )
+            resp.raise_for_status()
+            result = resp.json()
         except Exception as err:
             detail = _err_detail(err)
             _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
             raise RuntimeError(f"Package {package_id} {step} failed: {detail}") from err
+        if not result.get("success"):
+            error = result.get("error", {})
+            detail = f"DSM error {error.get('code')}: {error.get('errors', 'no detail')}"
+            _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
+            raise RuntimeError(f"Package {package_id} {step} failed: {detail}")
+        return result
 
     def _installable_info(self, package_id: str) -> dict:
         """Resolve a package's record from the installable feed."""
@@ -857,13 +886,8 @@ class SynologyClient:
         import time
 
         target_ver = pkg_info.get("version", "")
-        # Booleans go out JSON-encoded ("true"/"false"): the library would
-        # serialize Python bools as "True"/"False", which DSM rejects with
-        # error 120 {"name": "blqinst", "reason": "type"} on method "install"
-        # (verified live; method "upgrade" happens to tolerate it). DSM's own
-        # UI JSON-stringifies every non-string param.
-        is_syno = json.dumps(pkg_info.get("source") == "syno")
-        beta = json.dumps(bool(pkg_info.get("beta", False)))
+        is_syno = pkg_info.get("source") == "syno"
+        beta = bool(pkg_info.get("beta", False))
 
         # Step 1: download the SPK to the NAS; this returns a task id.
         download = self._installation_request(
@@ -878,7 +902,7 @@ class SynologyClient:
                 "checksum": pkg_info.get("md5", ""),
                 "filesize": pkg_info.get("size", 0),
                 "type": pkg_info.get("type", 0),
-                "blqinst": json.dumps(False),
+                "blqinst": False,
                 "is_syno": is_syno,
                 "beta": beta,
             },
@@ -911,11 +935,11 @@ class SynologyClient:
                 "method": method,
                 "version": 1,
                 "name": package_id,
-                "blqinst": json.dumps(True),
+                "blqinst": True,
                 "volume_path": volume_path,
                 "is_syno": is_syno,
                 "beta": beta,
-                "installrunpackage": json.dumps(True),
+                "installrunpackage": True,
             },
         )
 

@@ -1938,8 +1938,26 @@ class TestDisplayNameHelpers:
         assert _is_newer("1.5.2-1831", "1.5.2-1832") is False
 
 
+def _post_response(payload):
+    """Build a mocked requests.Response with the given JSON payload."""
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+def _post_download_ok(*_args, **_kwargs):
+    """Default requests.post stub: every Installation request succeeds."""
+    return _post_response(
+        {"success": True, "data": {"taskid": "@SYNOPKG_DOWNLOAD", "progress": 0.0}}
+    )
+
+
 class TestPackageUpgrade:
-    """Tests for the package upgrade flow."""
+    """Tests for the package upgrade flow.
+
+    The Installation write requests go out as raw POSTs (with X-SYNO-TOKEN
+    and JSON-encoded params), so assertions target the requests.post forms.
+    """
 
     def _make_client(self, mock_package_cls, mock_sysinfo_cls, target="1.5.2-1832"):
         pkg = MagicMock()
@@ -1958,9 +1976,6 @@ class TestPackageUpgrade:
                     }
                 ]
             }
-        }
-        pkg.request_data.return_value = {
-            "data": {"taskid": "@SYNOPKG_DOWNLOAD_HybridShare", "progress": 0.0}
         }
         pkg.get_dowload_package_status.return_value = {"data": {"finished": True, "progress": 1.0}}
         pkg.check_installation.return_value = {"data": {"volume_path": "/volume1"}}
@@ -1994,28 +2009,32 @@ class TestPackageUpgrade:
 
         DSM 7.3.2 rejects method "install" for an already-installed package
         with reserved error 120; Package Center sends method "upgrade".
+        Payload values go out JSON-encoded via POST with X-SYNO-TOKEN: the
+        library's GET trips method install's validation (error 120) and its
+        POST omits the token (error 119), both verified live.
         """
+        from unittest.mock import patch as mock_patch
+
         client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
 
-        client.upgrade_package("HybridShare")
+        with mock_patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("HybridShare")
 
-        download_call = pkg.request_data.call_args_list[0]
-        assert download_call.args[0] == "SYNO.Core.Package.Installation"
-        download_params = download_call.args[2]
-        assert download_params["method"] == "upgrade"
-        assert download_params["operation"] == "upgrade"
-        assert download_params["name"] == "HybridShare"
-        assert download_params["url"] == "https://example.com/hs.spk"
-        assert download_params["checksum"] == "deadbeef"
-        assert download_params["filesize"] == 12345
-        # Booleans must go out JSON-encoded: DSM rejects Python's "True"/
-        # "False" with error 120 {"name": "blqinst", "reason": "type"} on
-        # method "install" (verified live); its own UI sends true/false.
-        assert download_params["is_syno"] == "true"
-        assert download_params["beta"] == "false"
-        assert download_params["blqinst"] == "false"
+        download = mock_post.call_args_list[0]
+        form = download.kwargs["data"]
+        assert form["api"] == "SYNO.Core.Package.Installation"
+        assert form["method"] == "upgrade"
+        assert form["operation"] == '"upgrade"'
+        assert form["name"] == '"HybridShare"'
+        assert form["url"] == '"https://example.com/hs.spk"'
+        assert form["checksum"] == '"deadbeef"'
+        assert form["filesize"] == "12345"
+        assert form["is_syno"] == "true"
+        assert form["beta"] == "false"
+        assert form["blqinst"] == "false"
+        assert download.kwargs["headers"]["X-SYNO-TOKEN"] == client._package.session._syno_token
         # Poll the download status with the returned task id
-        pkg.get_dowload_package_status.assert_called_with("@SYNOPKG_DOWNLOAD_HybridShare")
+        pkg.get_dowload_package_status.assert_called_with("@SYNOPKG_DOWNLOAD")
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2024,20 +2043,22 @@ class TestPackageUpgrade:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """After download, install via Package Center's quick-upgrade request."""
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        from unittest.mock import patch as mock_patch
 
-        client.upgrade_package("HybridShare")
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
 
-        assert pkg.request_data.call_count == 2
-        install_call = pkg.request_data.call_args_list[1]
-        assert install_call.args[0] == "SYNO.Core.Package.Installation"
-        install_params = install_call.args[2]
-        assert install_params["method"] == "upgrade"
-        assert install_params["name"] == "HybridShare"
-        assert install_params["blqinst"] == "true"
-        assert install_params["volume_path"] == "/volume1"
-        assert install_params["installrunpackage"] == "true"
-        assert "url" not in install_params
+        with mock_patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("HybridShare")
+
+        assert mock_post.call_count == 2
+        form = mock_post.call_args_list[1].kwargs["data"]
+        assert form["api"] == "SYNO.Core.Package.Installation"
+        assert form["method"] == "upgrade"
+        assert form["name"] == '"HybridShare"'
+        assert form["blqinst"] == "true"
+        assert form["volume_path"] == '"/volume1"'
+        assert form["installrunpackage"] == "true"
+        assert "url" not in form
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2046,31 +2067,40 @@ class TestPackageUpgrade:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """If the download step returns no task id, fail loudly instead of silently."""
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        pkg.request_data.return_value = {"data": {}}
+        from unittest.mock import patch as mock_patch
 
-        with pytest.raises(RuntimeError):
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        with (
+            mock_patch(
+                "requests.post",
+                return_value=_post_response({"success": True, "data": {}}),
+            ) as mock_post,
+            pytest.raises(RuntimeError),
+        ):
             client.upgrade_package("HybridShare")
-        assert pkg.request_data.call_count == 1
+        assert mock_post.call_count == 1
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
     @patch("custom_components.synology_manager.synology_client.DockerApi")
     def test_upgrade_surfaces_dsm_error_code(self, mock_docker, mock_package_cls, mock_sysinfo_cls):
-        """API failures must report the step and numeric DSM error code.
+        """API failures must report the step, numeric DSM error code, and the
+        error payload (DSM's errors dict names the offending param - the
+        library used to drop all of it)."""
+        from unittest.mock import patch as mock_patch
 
-        The library maps reserved DSM codes (112-149) to the placeholder text
-        "Preserve for other purpose" and drops the number. Its exceptions can
-        stringify to "" (the text lives in .error_message), so mimic that.
-        """
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        err = Exception()
-        err.error_code = 120
-        err.error_message = "Preserve for other purpose"
-        pkg.request_data.side_effect = err
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        error_response = _post_response(
+            {
+                "success": False,
+                "error": {"code": 120, "errors": {"name": "blqinst", "reason": "type"}},
+            }
+        )
 
-        with pytest.raises(
-            RuntimeError, match=r"download failed: DSM error 120: Preserve for other purpose"
+        with (
+            mock_patch("requests.post", return_value=error_response),
+            pytest.raises(RuntimeError, match=r"download failed: DSM error 120.*blqinst"),
         ):
             client.upgrade_package("HybridShare")
 
@@ -2081,10 +2111,14 @@ class TestPackageUpgrade:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """Errors lacking error_code/error_message must not produce an empty detail."""
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        pkg.request_data.side_effect = ConnectionResetError()
+        from unittest.mock import patch as mock_patch
 
-        with pytest.raises(RuntimeError, match=r"download failed: ConnectionResetError"):
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        with (
+            mock_patch("requests.post", side_effect=ConnectionResetError()),
+            pytest.raises(RuntimeError, match=r"download failed: ConnectionResetError"),
+        ):
             client.upgrade_package("HybridShare")
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
@@ -2092,10 +2126,13 @@ class TestPackageUpgrade:
     @patch("custom_components.synology_manager.synology_client.DockerApi")
     def test_upgrade_reconnects_first(self, mock_docker, mock_package_cls, mock_sysinfo_cls):
         """The install path must refresh the shared session before starting."""
+        from unittest.mock import patch as mock_patch
+
         client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
         assert mock_package_cls.call_count == 1
 
-        client.upgrade_package("HybridShare")
+        with mock_patch("requests.post", side_effect=_post_download_ok):
+            client.upgrade_package("HybridShare")
 
         assert mock_package_cls.call_count == 2
 
@@ -2150,7 +2187,6 @@ class TestPackageUpgradeDependencies:
                 "packages": installable if installable is not None else [self.CONTACTS, self.NODEJS]
             }
         }
-        pkg.request_data.return_value = {"data": {"taskid": "@SYNOPKG_DOWNLOAD", "progress": 0.0}}
         pkg.get_dowload_package_status.return_value = {"data": {"finished": True, "progress": 1.0}}
         pkg.check_installation.return_value = {"data": {"volume_path": "/volume1"}}
         mock_package_cls.return_value = pkg
@@ -2185,31 +2221,30 @@ class TestPackageUpgradeDependencies:
     ):
         """Node.js_v22 gets a full fresh install (method "install") before the
         Contacts upgrade requests go out (method "upgrade")."""
-        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        from unittest.mock import patch as mock_patch
+
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
         client._installation_check = MagicMock(
             side_effect=[self.CHECK_MISSING_DEP, {"success": True}]
         )
 
-        client.upgrade_package("Contacts")
+        with mock_patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
 
-        calls = pkg.request_data.call_args_list
-        assert len(calls) == 4
-        dep_download = calls[0].args[2]
-        assert dep_download["name"] == "Node.js_v22"
-        assert dep_download["method"] == "install"
-        assert dep_download["operation"] == "install"
-        assert dep_download["url"] == "https://example.com/node22.spk"
-        dep_install = calls[1].args[2]
-        assert dep_install["name"] == "Node.js_v22"
-        assert dep_install["method"] == "install"
-        assert dep_install["blqinst"] == "true"
-        upgrade_download = calls[2].args[2]
-        assert upgrade_download["name"] == "Contacts"
-        assert upgrade_download["method"] == "upgrade"
-        upgrade_install = calls[3].args[2]
-        assert upgrade_install["name"] == "Contacts"
-        assert upgrade_install["method"] == "upgrade"
-        assert upgrade_install["blqinst"] == "true"
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 4
+        assert forms[0]["name"] == '"Node.js_v22"'
+        assert forms[0]["method"] == "install"
+        assert forms[0]["operation"] == '"install"'
+        assert forms[0]["url"] == '"https://example.com/node22.spk"'
+        assert forms[1]["name"] == '"Node.js_v22"'
+        assert forms[1]["method"] == "install"
+        assert forms[1]["blqinst"] == "true"
+        assert forms[2]["name"] == '"Contacts"'
+        assert forms[2]["method"] == "upgrade"
+        assert forms[3]["name"] == '"Contacts"'
+        assert forms[3]["method"] == "upgrade"
+        assert forms[3]["blqinst"] == "true"
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2217,13 +2252,17 @@ class TestPackageUpgradeDependencies:
     def test_no_missing_dependencies_upgrades_directly(
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
-        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        from unittest.mock import patch as mock_patch
+
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
         client._installation_check = MagicMock(return_value={"success": True})
 
-        client.upgrade_package("Contacts")
+        with mock_patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
 
-        assert len(pkg.request_data.call_args_list) == 2
-        assert all(c.args[2]["name"] == "Contacts" for c in pkg.request_data.call_args_list)
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 2
+        assert all(f["name"] == '"Contacts"' for f in forms)
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2232,7 +2271,9 @@ class TestPackageUpgradeDependencies:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """DSM sends uninstall_packages as "" (empty string) when nothing is missing."""
-        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        from unittest.mock import patch as mock_patch
+
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
         client._installation_check = MagicMock(
             return_value={
                 "success": False,
@@ -2240,10 +2281,12 @@ class TestPackageUpgradeDependencies:
             }
         )
 
-        client.upgrade_package("Contacts")
+        with mock_patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
 
-        assert len(pkg.request_data.call_args_list) == 2
-        assert all(c.args[2]["name"] == "Contacts" for c in pkg.request_data.call_args_list)
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 2
+        assert all(f["name"] == '"Contacts"' for f in forms)
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2253,14 +2296,18 @@ class TestPackageUpgradeDependencies:
     ):
         """The check is best-effort: if it errors, log and let the upgrade try."""
         import logging
+        from unittest.mock import patch as mock_patch
 
-        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
         client._installation_check = MagicMock(side_effect=ConnectionResetError())
 
-        with caplog.at_level(logging.WARNING):
+        with (
+            caplog.at_level(logging.WARNING),
+            mock_patch("requests.post", side_effect=_post_download_ok) as mock_post,
+        ):
             client.upgrade_package("Contacts")
 
-        assert len(pkg.request_data.call_args_list) == 2
+        assert mock_post.call_count == 2
         assert any("check" in r.message.lower() for r in caplog.records)
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
@@ -2270,14 +2317,19 @@ class TestPackageUpgradeDependencies:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """If deps stay missing after installing them, fail instead of looping."""
-        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        from unittest.mock import patch as mock_patch
+
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
         client._installation_check = MagicMock(return_value=self.CHECK_MISSING_DEP)
 
-        with pytest.raises(RuntimeError, match="dependenc"):
+        with (
+            mock_patch("requests.post", side_effect=_post_download_ok) as mock_post,
+            pytest.raises(RuntimeError, match="dependenc"),
+        ):
             client.upgrade_package("Contacts")
 
         # never reached the Contacts upgrade requests
-        assert all(c.args[2]["name"] != "Contacts" for c in pkg.request_data.call_args_list)
+        assert all(c.kwargs["data"]["name"] != '"Contacts"' for c in mock_post.call_args_list)
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2352,16 +2404,20 @@ class TestPackageUpgradeDependencies:
         treated as "no missing dependencies" (a swallowed 119 masked the
         Contacts failure on first live validation)."""
         import logging
+        from unittest.mock import patch as mock_patch
 
-        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
         client._installation_check = MagicMock(
             return_value={"success": False, "error": {"code": 119}}
         )
 
-        with caplog.at_level(logging.WARNING):
+        with (
+            caplog.at_level(logging.WARNING),
+            mock_patch("requests.post", side_effect=_post_download_ok) as mock_post,
+        ):
             client.upgrade_package("Contacts")
 
-        assert len(pkg.request_data.call_args_list) == 2  # proceeded with upgrade
+        assert mock_post.call_count == 2  # proceeded with upgrade
         assert any("119" in r.message for r in caplog.records)
 
 
