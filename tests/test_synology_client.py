@@ -2008,8 +2008,12 @@ class TestPackageUpgrade:
         assert download_params["url"] == "https://example.com/hs.spk"
         assert download_params["checksum"] == "deadbeef"
         assert download_params["filesize"] == 12345
-        assert download_params["is_syno"] is True
-        assert download_params["beta"] is False
+        # Booleans must go out JSON-encoded: DSM rejects Python's "True"/
+        # "False" with error 120 {"name": "blqinst", "reason": "type"} on
+        # method "install" (verified live); its own UI sends true/false.
+        assert download_params["is_syno"] == "true"
+        assert download_params["beta"] == "false"
+        assert download_params["blqinst"] == "false"
         # Poll the download status with the returned task id
         pkg.get_dowload_package_status.assert_called_with("@SYNOPKG_DOWNLOAD_HybridShare")
 
@@ -2030,9 +2034,9 @@ class TestPackageUpgrade:
         install_params = install_call.args[2]
         assert install_params["method"] == "upgrade"
         assert install_params["name"] == "HybridShare"
-        assert install_params["blqinst"] is True
+        assert install_params["blqinst"] == "true"
         assert install_params["volume_path"] == "/volume1"
-        assert install_params["installrunpackage"] is True
+        assert install_params["installrunpackage"] == "true"
         assert "url" not in install_params
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
@@ -2198,14 +2202,14 @@ class TestPackageUpgradeDependencies:
         dep_install = calls[1].args[2]
         assert dep_install["name"] == "Node.js_v22"
         assert dep_install["method"] == "install"
-        assert dep_install["blqinst"] is True
+        assert dep_install["blqinst"] == "true"
         upgrade_download = calls[2].args[2]
         assert upgrade_download["name"] == "Contacts"
         assert upgrade_download["method"] == "upgrade"
         upgrade_install = calls[3].args[2]
         assert upgrade_install["name"] == "Contacts"
         assert upgrade_install["method"] == "upgrade"
-        assert upgrade_install["blqinst"] is True
+        assert upgrade_install["blqinst"] == "true"
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")

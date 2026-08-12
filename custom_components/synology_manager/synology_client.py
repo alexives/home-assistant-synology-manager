@@ -857,8 +857,13 @@ class SynologyClient:
         import time
 
         target_ver = pkg_info.get("version", "")
-        is_syno = pkg_info.get("source") == "syno"
-        beta = bool(pkg_info.get("beta", False))
+        # Booleans go out JSON-encoded ("true"/"false"): the library would
+        # serialize Python bools as "True"/"False", which DSM rejects with
+        # error 120 {"name": "blqinst", "reason": "type"} on method "install"
+        # (verified live; method "upgrade" happens to tolerate it). DSM's own
+        # UI JSON-stringifies every non-string param.
+        is_syno = json.dumps(pkg_info.get("source") == "syno")
+        beta = json.dumps(bool(pkg_info.get("beta", False)))
 
         # Step 1: download the SPK to the NAS; this returns a task id.
         download = self._installation_request(
@@ -873,7 +878,7 @@ class SynologyClient:
                 "checksum": pkg_info.get("md5", ""),
                 "filesize": pkg_info.get("size", 0),
                 "type": pkg_info.get("type", 0),
-                "blqinst": False,
+                "blqinst": json.dumps(False),
                 "is_syno": is_syno,
                 "beta": beta,
             },
@@ -906,11 +911,11 @@ class SynologyClient:
                 "method": method,
                 "version": 1,
                 "name": package_id,
-                "blqinst": True,
+                "blqinst": json.dumps(True),
                 "volume_path": volume_path,
                 "is_syno": is_syno,
                 "beta": beta,
-                "installrunpackage": True,
+                "installrunpackage": json.dumps(True),
             },
         )
 
