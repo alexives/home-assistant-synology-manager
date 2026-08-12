@@ -5,8 +5,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_components.synology_manager.synology_client import (
+    DsmUpdateInfo,
     SynologyAuthenticationError,
     SynologyClient,
+    SynologyConnectionError,
     _err_detail,
 )
 
@@ -27,6 +29,20 @@ class TestErrDetail:
 
     def test_falls_back_to_type_name(self):
         assert _err_detail(ValueError()) == "ValueError"
+
+    def test_translates_system_not_ready_499(self):
+        """Any popup or log built from a 499 must say the NAS is not ready.
+
+        Every client call fails with the library's bare KeyError(499) while
+        DSM boots or applies an update, so the shared formatter - not just
+        connect() - has to translate it.
+        """
+        assert "not ready" in _err_detail(KeyError(499))
+
+    def test_translates_system_upgrading_498_from_error_code(self):
+        err = Exception("")
+        err.error_code = 498
+        assert "not ready" in _err_detail(err)
 
 
 class TestClientConstruction:
@@ -94,6 +110,45 @@ class TestClientConstruction:
             verify_ssl=False,
         )
         with pytest.raises(SynologyAuthenticationError):
+            client.connect()
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    def test_connect_system_not_ready_499_raises_clear_connection_error(self, mock_sysinfo):
+        """Auth error 499 means "system not ready" (NAS booting or applying a DSM update).
+
+        The library doesn't know code 499 and crashes with KeyError while
+        building its own message (verified live against DSM 7.4.1), so the
+        client must translate it instead of surfacing a bare "499".
+        """
+        mock_sysinfo.side_effect = KeyError(499)
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        with pytest.raises(SynologyConnectionError, match="not ready"):
+            client.connect()
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    def test_connect_system_upgrading_498_raises_clear_connection_error(self, mock_sysinfo):
+        """Auth error 498 means the system is upgrading (DSM login JS: error_upgrading)."""
+        err = Exception("")
+        err.error_code = 498
+        mock_sysinfo.side_effect = err
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        with pytest.raises(SynologyConnectionError, match="not ready"):
             client.connect()
 
 
@@ -315,6 +370,343 @@ class TestUpgradeDsm:
             c for c in mock_instance.request_data.call_args_list if c.args[0] == "SYNO.Core.Upgrade"
         ]
         assert installs == []
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_connection_loss_on_final_start_is_success(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """The NAS tears down its web stack as soon as the upgrade starts.
+
+        A dropped connection on the final SYNO.Core.Upgrade start POST means
+        the upgrade is running, not that it failed (verified live: DSM 7.3.2
+        -> 7.4.1 succeeded while the action popup reported failure).
+        """
+        import requests
+
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                requests.exceptions.ConnectionError("Connection aborted."),
+            ],
+        )
+        # First reconnect is upgrade_dsm's entry; the second is the
+        # post-drop probe confirming the NAS really went dark.
+        client.reconnect = MagicMock(
+            side_effect=[None, SynologyConnectionError("DSM is not ready (error 499)")]
+        )
+
+        client.upgrade_dsm()  # must not raise
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_chunked_response_teardown_is_success(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """A clean FIN mid-response surfaces as ChunkedEncodingError, not ConnectionError."""
+        import requests
+
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead"),
+            ],
+        )
+        client.reconnect = MagicMock(
+            side_effect=[None, SynologyConnectionError("DSM is not ready (error 499)")]
+        )
+
+        client.upgrade_dsm()  # must not raise
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_connection_blip_with_healthy_nas_reraises(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """A transient blip is not an upgrade: if the NAS answers the probe and
+        the update is still pending, the start never landed - surface the error
+        instead of telling the user the upgrade began."""
+        import requests
+
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                requests.exceptions.ConnectionError("Connection aborted."),
+            ],
+        )
+        client.reconnect = MagicMock(side_effect=[None, None])
+        client.get_dsm_update = MagicMock(
+            return_value=DsmUpdateInfo(
+                installed_version="7.3.2-86009",
+                latest_version="7.4.1-90080",
+                update_available=True,
+                release_notes=None,
+            )
+        )
+
+        with pytest.raises(requests.exceptions.ConnectionError):
+            client.upgrade_dsm()
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_drop_with_update_no_longer_pending_is_success(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """If the probe finds the update gone from the pending list, it was accepted."""
+        import requests
+
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                requests.exceptions.ConnectionError("Connection aborted."),
+            ],
+        )
+        client.reconnect = MagicMock(side_effect=[None, None])
+        client.get_dsm_update = MagicMock(
+            return_value=DsmUpdateInfo(
+                installed_version="7.4.1-90080",
+                latest_version=None,
+                update_available=False,
+                release_notes=None,
+            )
+        )
+
+        client.upgrade_dsm()  # must not raise
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_system_not_ready_on_final_start_is_success(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """DSM answers 499 ("system not ready") once the upgrade begins applying."""
+        err = Exception("")
+        err.error_code = 499
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                err,
+            ],
+        )
+
+        client.upgrade_dsm()  # must not raise
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_upgrade_dsm_unrelated_error_on_final_start_raises(
+        self, mock_docker, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """A real DSM error on the final start (e.g. 119 stale session) must surface."""
+        err = Exception("")
+        err.error_code = 119
+        client, _ = self._client(
+            mock_sysinfo,
+            [
+                {"success": True},  # Download start
+                {"data": {"status": "finished", "percent": 100}, "success": True},
+                err,
+            ],
+        )
+
+        with pytest.raises(Exception) as excinfo:
+            client.upgrade_dsm()
+        assert excinfo.value.error_code == 119
+
+
+class TestContainerManagerWait:
+    """Docker writes must wait out Container Manager's post-reboot startup.
+
+    After a DSM update reboot the ContainerManager package sits in status
+    "starting" for minutes and its API answers with misleading error codes
+    (observed live: the library rendered one as "The sum of the maximum
+    bandwidth is too large").
+    """
+
+    def _client(self, mock_docker_cls):
+        mock_docker_inst = MagicMock()
+        mock_docker_inst.containers.return_value = {
+            "data": {
+                "containers": [
+                    {
+                        "name": "mealie-mealie-1",
+                        "Labels": {"com.docker.compose.project": "mealie"},
+                    },
+                ]
+            },
+        }
+        mock_docker_inst.list_projects.return_value = {
+            "data": {"uuid-mealie": {"name": "mealie", "status": "RUNNING"}},
+        }
+        mock_docker_cls.return_value = mock_docker_inst
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+        client.reconnect = lambda: None
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
+        client._build_project = MagicMock()
+        return client
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_update_container_waits_for_container_manager_starting(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """update_container polls package status until ContainerManager is running."""
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(
+            side_effect=[
+                {"ContainerManager": {"status": "starting"}},
+                {"ContainerManager": {"status": "starting"}},
+                {"ContainerManager": {"status": "running"}},
+            ]
+        )
+
+        client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
+
+        assert client._get_package_status.call_count == 3
+        client._build_project.assert_called_once_with("uuid-mealie")
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_update_container_fails_when_status_cannot_be_confirmed(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """An empty status map means "unknowable", not "ready".
+
+        The status fetch fails in exactly the flapping post-reboot window the
+        gate exists for, so keep polling and fail with the real cause instead
+        of letting the Docker write produce a misleading error.
+        """
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(return_value={})
+
+        with pytest.raises(RuntimeError, match="Container Manager"):
+            client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
+
+        client._build_project.assert_not_called()
+        assert client._get_package_status.call_count > 1  # kept polling
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_update_container_proceeds_without_container_manager_package(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """A populated status map with no Container Manager entry means it's not
+        installed - proceed and let the Docker call report its own error."""
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(return_value={"HyperBackup": {"status": "running"}})
+
+        client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
+
+        client._build_project.assert_called_once_with("uuid-mealie")
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_start_and_stop_project_gated_on_container_manager(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """The compose-project switches issue the same Docker writes and need the gate too."""
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "stop"}}
+        )
+
+        with pytest.raises(RuntimeError, match="Container Manager"):
+            client.start_project("uuid-mealie")
+        with pytest.raises(RuntimeError, match="Container Manager"):
+            client.stop_project("uuid-mealie")
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_update_container_raises_when_container_manager_stopped(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """A stopped Container Manager can't rebuild anything - fail with a clear cause."""
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "stop"}}
+        )
+
+        with pytest.raises(RuntimeError, match="Container Manager"):
+            client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
+
+        client._build_project.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_update_container_times_out_when_container_manager_stuck(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """A Container Manager stuck in "starting" must eventually fail, not hang."""
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "starting"}}
+        )
+
+        with pytest.raises(RuntimeError, match="Container Manager"):
+            client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
+
+        client._build_project.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_update_project_waits_for_container_manager(
+        self, mock_docker_cls, mock_package, mock_sysinfo, mock_sleep
+    ):
+        """update_project goes through the same Container Manager readiness gate."""
+        client = self._client(mock_docker_cls)
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "stop"}}
+        )
+
+        with pytest.raises(RuntimeError, match="Container Manager"):
+            client.update_project("uuid-mealie", ["ghcr.io/mealie-recipes/mealie:v2.6.0"])
+
+        client._build_project.assert_not_called()
 
 
 class TestPackages:
@@ -1060,6 +1452,9 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._compound_project_request = MagicMock()
 
         client.stop_project("uuid-mealie")
@@ -1104,6 +1499,9 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._compound_project_request = MagicMock(side_effect=RuntimeError("compound failed"))
 
         client.stop_project("uuid-mealie")
@@ -1125,6 +1523,9 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._compound_project_request = MagicMock()
 
         client.start_project("uuid-rallly")
@@ -1169,6 +1570,9 @@ class TestDockerWriteOperations:
             verify_ssl=False,
         )
         client.connect()
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._compound_project_request = MagicMock(side_effect=RuntimeError("compound failed"))
 
         client.start_project("uuid-rallly")
@@ -1300,6 +1704,9 @@ class TestDockerWriteOperations:
         )
         client.connect()
         client.reconnect = lambda: None
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
 
         client._build_project = MagicMock()
         client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
@@ -1334,6 +1741,9 @@ class TestDockerWriteOperations:
         )
         client.connect()
         client.reconnect = lambda: None
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
 
         client.update_container("standalone-app", "ghcr.io/org/app:1.0")
 
@@ -1384,6 +1794,9 @@ class TestDockerWriteOperations:
         )
         client.connect()
         client.reconnect = lambda: None
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._build_project = MagicMock()
 
         client.update_container("rallly-rallly-1", "lukevella/rallly:3.12.1")
@@ -1426,6 +1839,9 @@ class TestDockerWriteOperations:
         )
         client.connect()
         client.reconnect = lambda: None
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._build_project = MagicMock()
 
         client.update_container("mealie-mealie-1", "ghcr.io/mealie-recipes/mealie:v2.6.0")
@@ -1466,6 +1882,9 @@ class TestDockerWriteOperations:
         )
         client.connect()
         client.reconnect = lambda: None
+        client._get_package_status = MagicMock(
+            return_value={"ContainerManager": {"status": "running"}}
+        )
         client._build_project = MagicMock()
 
         client.update_container("app", "lscr.io/linuxserver/plex:latest")

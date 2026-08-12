@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .actions import run_action
+from .actions import notify, run_action
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
+
+# Synology's guidance for how long a DSM update (download, apply, reboot)
+# can take; the post-upgrade refresh must wait it out, since a failed
+# refresh would mark every entity unavailable for a full 6-hour interval.
+DSM_UPGRADE_WINDOW = timedelta(minutes=25)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,7 +117,22 @@ class SynologyDSMUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], Upd
             "Updating DSM",
             self.coordinator.client.upgrade_dsm,
         )
-        await self.coordinator.async_request_refresh()
+        notify(
+            self.hass,
+            self.coordinator.config_entry.entry_id,
+            "DSM update started. The NAS is applying the update and will "
+            "reboot - Synology says this can take up to 20 minutes, during "
+            "which the NAS and its entities are unreachable. This is "
+            "expected; do not power the NAS off.",
+            suffix="dsm_upgrade",
+        )
+
+        # Refreshing now would fail against the rebooting NAS and mark every
+        # entity unavailable until the next 6-hour tick; wait out the window.
+        async def _refresh_after_reboot(_now) -> None:
+            await self.coordinator.async_request_refresh()
+
+        async_call_later(self.hass, DSM_UPGRADE_WINDOW, _refresh_after_reboot)
 
 
 class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], UpdateEntity):
