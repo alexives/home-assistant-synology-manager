@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -12,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .actions import run_action
+from .const import DOMAIN
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
 
@@ -109,6 +111,17 @@ class SynologyDSMUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], Upd
             self.coordinator.config_entry.entry_id,
             "Updating DSM",
             self.coordinator.client.upgrade_dsm,
+        )
+        persistent_notification.async_create(
+            self.hass,
+            message=(
+                "DSM update started. The NAS is applying the update and will "
+                "reboot - Synology says this can take up to 20 minutes, during "
+                "which the NAS and its entities are unreachable. This is "
+                "expected; do not power the NAS off."
+            ),
+            title="Synology Manager",
+            notification_id=f"{DOMAIN}_{self.coordinator.config_entry.entry_id}_dsm_upgrade",
         )
         await self.coordinator.async_request_refresh()
 

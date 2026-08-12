@@ -119,6 +119,49 @@ class TestDSMUpdateEntity:
             mock_coordinator.client.upgrade_dsm
         )
 
+    @pytest.mark.asyncio
+    async def test_install_notifies_about_upgrade_duration(self, mock_coordinator):
+        """Starting a DSM upgrade warns the user it can take up to 20 minutes.
+
+        Synology's own guidance: the update (and reboot) can take up to 20
+        minutes, during which the NAS is unreachable - without the heads-up
+        the outage reads as a failure.
+        """
+        from unittest.mock import patch
+
+        entity = SynologyDSMUpdateEntity(mock_coordinator)
+        entity.hass = MagicMock()
+        entity.hass.async_add_executor_job = AsyncMock()
+
+        with patch("custom_components.synology_manager.update.persistent_notification") as mock_pn:
+            await entity.async_install(version=None, backup=None)
+
+        mock_pn.async_create.assert_called_once()
+        message = mock_pn.async_create.call_args.kwargs["message"]
+        assert "20 minutes" in message
+
+    @pytest.mark.asyncio
+    async def test_install_failure_skips_duration_notification(self, mock_coordinator):
+        """No "upgrade started" notice when the trigger itself failed."""
+        from unittest.mock import patch
+
+        from homeassistant.exceptions import HomeAssistantError
+
+        entity = SynologyDSMUpdateEntity(mock_coordinator)
+        entity.hass = MagicMock()
+        entity.hass.async_add_executor_job = AsyncMock(
+            side_effect=RuntimeError("DSM update download failed")
+        )
+
+        with (
+            patch("custom_components.synology_manager.update.persistent_notification") as mock_pn,
+            patch("custom_components.synology_manager.actions.persistent_notification"),
+            pytest.raises(HomeAssistantError),
+        ):
+            await entity.async_install(version=None, backup=None)
+
+        mock_pn.async_create.assert_not_called()
+
 
 class TestPackageUpdateEntity:
     """Tests for the package update entity."""

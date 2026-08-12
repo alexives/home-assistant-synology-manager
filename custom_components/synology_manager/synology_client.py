@@ -29,6 +29,41 @@ class SynologyConnectionError(Exception):
     """Raised when the NAS is unreachable."""
 
 
+def _nas_not_ready_code(err: BaseException) -> int | None:
+    """Return 498/499 when the exception chain says DSM itself is not ready.
+
+    While booting or applying a system update, DSM answers every API call -
+    login included - with error 499 ("system not ready" in DSM's own login
+    JS) or 498 ("system upgrading"). The library has no table entry for
+    either code and dies with a KeyError while formatting its message, so
+    check both the ``error_code`` attribute and bare KeyError shapes.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = err
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if getattr(cur, "error_code", None) in (498, 499):
+            return cur.error_code  # type: ignore[attr-defined]
+        if isinstance(cur, KeyError) and cur.args and cur.args[0] in (498, 499):
+            return cur.args[0]
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _connection_dropped(err: BaseException) -> bool:
+    """True when the exception chain contains a dropped/refused connection."""
+    import requests
+
+    seen: set[int] = set()
+    cur: BaseException | None = err
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (requests.exceptions.ConnectionError, ConnectionError)):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 @dataclass
 class DsmUpdateInfo:
     """DSM firmware update information."""
@@ -211,6 +246,12 @@ class SynologyClient:
             self._sysinfo = SysInfo(**kwargs)
             self._package = Package(**kwargs)
         except Exception as err:
+            not_ready = _nas_not_ready_code(err)
+            if not_ready is not None:
+                raise SynologyConnectionError(
+                    f"DSM is not ready (error {not_ready}: the NAS is starting up "
+                    "or applying a system update); it should recover on its own"
+                ) from err
             err_str = str(err).lower()
             if "login" in err_str or "auth" in err_str or "credential" in err_str:
                 raise SynologyAuthenticationError(str(err)) from err
@@ -654,12 +695,24 @@ class SynologyClient:
         else:
             raise RuntimeError("DSM update download did not finish within timeout")
 
-        self._sysinfo.request_data(
-            "SYNO.Core.Upgrade",
-            "entry.cgi",
-            req_param={"method": "start", "version": 1, "force": True, "type": "server"},
-            method="post",
-        )
+        try:
+            self._sysinfo.request_data(
+                "SYNO.Core.Upgrade",
+                "entry.cgi",
+                req_param={"method": "start", "version": 1, "force": True, "type": "server"},
+                method="post",
+            )
+        except Exception as err:
+            # Once DSM accepts the start it tears down its web stack, so a
+            # dropped connection or 498/499 here means the upgrade is running
+            # (verified live: 7.3.2 -> 7.4.1 applied while this call "failed").
+            if _connection_dropped(err) or _nas_not_ready_code(err) is not None:
+                _LOGGER.info(
+                    "DSM upgrade started; the NAS is applying the update and will reboot (%s)",
+                    _err_detail(err),
+                )
+                return
+            raise
 
     def _installation_request(self, package_id: str, step: str, params: dict) -> dict:
         """Call ``SYNO.Core.Package.Installation``, surfacing the DSM error code.
@@ -822,9 +875,40 @@ class SynologyClient:
         except Exception:
             _LOGGER.warning("Reconnect failed", exc_info=True)
 
+    def _wait_for_container_manager(self, attempts: int = 36) -> None:
+        """Block until the Container Manager package reports running.
+
+        After a reboot (e.g. a DSM update) the package sits in "starting" for
+        minutes while its API answers with misleading error codes, so gate
+        Docker writes on it. If the status can't be fetched at all, proceed
+        and let the real call surface its own error.
+        """
+        import time
+
+        for _ in range(attempts):
+            status_map = self._get_package_status()
+            entry = status_map.get("ContainerManager") or status_map.get("Docker")
+            if entry is None:
+                return
+            status = entry.get("status")
+            if status in (None, "running"):
+                return
+            if status in ("stop", "stopped", "broken"):
+                raise RuntimeError(
+                    f"Container Manager is {status}; start it in Package Center "
+                    "before updating containers"
+                )
+            _LOGGER.debug("Container Manager is %s, waiting for it to be running", status)
+            time.sleep(5)
+        raise RuntimeError(
+            "Container Manager did not become ready in time; it is still "
+            "starting or upgrading - try again in a few minutes"
+        )
+
     def update_container(self, container_name: str, image: str) -> None:
         """Rebuild a container's compose project with the latest image on disk."""
         self.reconnect()
+        self._wait_for_container_manager()
         repo = image.split(":")[0] if ":" in image else image
         tag = image.split(":")[-1] if ":" in image else "latest"
 
@@ -863,6 +947,7 @@ class SynologyClient:
     def update_project(self, project_id: str, images: list[str]) -> None:
         """Pull images that need it, then rebuild the compose project."""
         self.reconnect()
+        self._wait_for_container_manager()
         for image in images:
             repo = image.split(":")[0] if ":" in image else image
             tag = image.split(":")[-1] if ":" in image else "latest"
