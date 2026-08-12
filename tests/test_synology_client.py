@@ -2317,6 +2317,49 @@ class TestPackageUpgradeDependencies:
         assert form["depsers"] == '"pgsql-adapter.service"'
         assert "Node.js_v22" in form["deppkgs"]
 
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_installation_check_sends_syno_token_header(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Without X-SYNO-TOKEN the check fails with error 119 even on a fresh
+        SID (verified live) - the library's session logs in with a token and
+        DSM requires it on POSTs, same as _compound_request."""
+        from unittest.mock import patch as mock_patch
+
+        client, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        response = MagicMock()
+        response.json.return_value = {"success": True}
+        with mock_patch("requests.post", return_value=response) as mock_post:
+            client._installation_check(self.CONTACTS)
+
+        headers = mock_post.call_args.kwargs["headers"]
+        assert headers["X-SYNO-TOKEN"] == client._package.session._syno_token
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_unexpected_check_error_logs_warning_and_proceeds(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls, caplog
+    ):
+        """A check failure other than 4526 must be visible, not silently
+        treated as "no missing dependencies" (a swallowed 119 masked the
+        Contacts failure on first live validation)."""
+        import logging
+
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            return_value={"success": False, "error": {"code": 119}}
+        )
+
+        with caplog.at_level(logging.WARNING):
+            client.upgrade_package("Contacts")
+
+        assert len(pkg.request_data.call_args_list) == 2  # proceeded with upgrade
+        assert any("119" in r.message for r in caplog.records)
+
 
 class TestTriggerSecurityScan:
     """Tests for the Security Advisor scan trigger."""

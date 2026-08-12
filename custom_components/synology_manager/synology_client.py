@@ -789,9 +789,12 @@ class SynologyClient:
         wizard would install first, so this goes out raw - the library drops
         error payloads. String params must be JSON-encoded: bare strings fail
         with error 120 reason "type" (same gotcha as SecurityScan's items).
+        The X-SYNO-TOKEN header is required alongside the SID - without it
+        DSM answers error 119 even on a fresh session (verified live).
         """
         import requests as req_lib
 
+        session = self._package.session
         form: dict[str, Any] = {
             "api": "SYNO.Core.Package.Installation",
             "version": "2",
@@ -799,7 +802,7 @@ class SynologyClient:
             "id": json.dumps(pkg_info.get("id", "")),
             "ver": json.dumps(pkg_info.get("version", "")),
             "blupgrade": "true",
-            "_sid": self._package.session._sid,
+            "_sid": session._sid,
         }
         for key in ("deppkgs", "depsers", "conflictpkgs", "breakpkgs", "replacepkgs"):
             value = pkg_info.get(key)
@@ -810,6 +813,7 @@ class SynologyClient:
             f"{scheme}://{self._host}:{self._port}/webapi/entry.cgi",
             data=form,
             verify=self._verify_ssl,
+            headers={"X-SYNO-TOKEN": session._syno_token},
         )
         resp.raise_for_status()
         return resp.json()
@@ -830,9 +834,18 @@ class SynologyClient:
                 _err_detail(err),
             )
             return []
-        missing = result.get("error", {}).get("errors", {}).get("uninstall_packages")
+        error = result.get("error", {})
+        missing = error.get("errors", {}).get("uninstall_packages")
         if isinstance(missing, dict):
             return list(missing)
+        if not result.get("success") and error.get("code") != 4526:
+            # 4526 is the expected "wizard info" answer; anything else means
+            # the check itself misfired - don't let best-effort hide it.
+            _LOGGER.warning(
+                "Pre-upgrade dependency check for %s returned DSM error %s, proceeding without it",
+                pkg_info.get("id"),
+                error.get("code"),
+            )
         return []
 
     def _run_package_operation(self, package_id: str, pkg_info: dict, method: str) -> None:
