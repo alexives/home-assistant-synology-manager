@@ -772,39 +772,89 @@ class SynologyClient:
             _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
             raise RuntimeError(f"Package {package_id} {step} failed: {detail}") from err
 
-    def upgrade_package(self, package_id: str) -> None:
-        """Upgrade a package via the DSM download-then-upgrade flow.
-
-        Both write requests use method ``upgrade``: DSM 7.3.2 rejects method
-        ``install`` for an already-installed package with reserved error 120.
-        The requests mirror what Package Center's ``_onRequestDownload`` and
-        ``_onRequestQuickInstall`` send (captured from PkgManApp.js).
-
-        Reconnects first: the shared SID is often stale by the time the user
-        clicks Install (the coordinator only polls every 6 hours).
-        """
-        import time
-
-        self.reconnect()
+    def _installable_info(self, package_id: str) -> dict:
+        """Resolve a package's record from the installable feed."""
         response = self._package.list_installable()
         installable = response.get("data", {}).get("packages", [])
         pkg_info = next((p for p in installable if p.get("id") == package_id), None)
         if pkg_info is None:
             raise RuntimeError(f"Package {package_id} not found in installable list")
+        return pkg_info
+
+    def _installation_check(self, pkg_info: dict) -> dict:
+        """Mirror Package Center's pre-upgrade check, keeping the error payload.
+
+        ``SYNO.Core.Package.Installation`` ``check`` v2 answers error 4526
+        whose ``errors.uninstall_packages`` lists the dependency packages the
+        wizard would install first, so this goes out raw - the library drops
+        error payloads. String params must be JSON-encoded: bare strings fail
+        with error 120 reason "type" (same gotcha as SecurityScan's items).
+        """
+        import requests as req_lib
+
+        form: dict[str, Any] = {
+            "api": "SYNO.Core.Package.Installation",
+            "version": "2",
+            "method": "check",
+            "id": json.dumps(pkg_info.get("id", "")),
+            "ver": json.dumps(pkg_info.get("version", "")),
+            "blupgrade": "true",
+            "_sid": self._package.session._sid,
+        }
+        for key in ("deppkgs", "depsers", "conflictpkgs", "breakpkgs", "replacepkgs"):
+            value = pkg_info.get(key)
+            if value is not None:
+                form[key] = json.dumps(value)
+        scheme = "https" if self._secure else "http"
+        resp = req_lib.post(
+            f"{scheme}://{self._host}:{self._port}/webapi/entry.cgi",
+            data=form,
+            verify=self._verify_ssl,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _missing_dependencies(self, pkg_info: dict) -> list[str]:
+        """Dependency packages that must be installed before this upgrade.
+
+        Best-effort: if the check itself fails, proceed and let the upgrade
+        surface its own error. DSM sends ``uninstall_packages`` as a dict of
+        missing package ids, or "" when nothing is missing.
+        """
+        try:
+            result = self._installation_check(pkg_info)
+        except Exception as err:
+            _LOGGER.warning(
+                "Pre-upgrade dependency check for %s failed, proceeding without it: %s",
+                pkg_info.get("id"),
+                _err_detail(err),
+            )
+            return []
+        missing = result.get("error", {}).get("errors", {}).get("uninstall_packages")
+        if isinstance(missing, dict):
+            return list(missing)
+        return []
+
+    def _run_package_operation(self, package_id: str, pkg_info: dict, method: str) -> None:
+        """Download an SPK then apply it via Package Center's quick request.
+
+        ``method`` is ``upgrade`` for installed packages and ``install`` for
+        new ones (dependencies) - the same split Package Center makes.
+        """
+        import time
 
         target_ver = pkg_info.get("version", "")
         is_syno = pkg_info.get("source") == "syno"
         beta = bool(pkg_info.get("beta", False))
-        _LOGGER.debug("Upgrading package %s to %s", package_id, target_ver)
 
         # Step 1: download the SPK to the NAS; this returns a task id.
         download = self._installation_request(
             package_id,
             "download",
             {
-                "method": "upgrade",
+                "method": method,
                 "version": 1,
-                "operation": "upgrade",
+                "operation": method,
                 "name": package_id,
                 "url": pkg_info.get("link", ""),
                 "checksum": pkg_info.get("md5", ""),
@@ -835,12 +885,12 @@ class SynologyClient:
             self._package.check_installation(package_id).get("data", {}).get("volume_path", "")
         )
 
-        # Step 4: install the downloaded package via the quick-upgrade request.
+        # Step 4: apply the downloaded package via the quick install/upgrade request.
         self._installation_request(
             package_id,
             "install",
             {
-                "method": "upgrade",
+                "method": method,
                 "version": 1,
                 "name": package_id,
                 "blqinst": True,
@@ -859,7 +909,42 @@ class SynologyClient:
                     return
             time.sleep(2)
 
-        _LOGGER.warning("Package %s upgrade did not complete within timeout", package_id)
+        _LOGGER.warning("Package %s %s did not complete within timeout", package_id, method)
+
+    def upgrade_package(self, package_id: str) -> None:
+        """Upgrade a package via the DSM download-then-upgrade flow.
+
+        Both write requests use method ``upgrade``: DSM 7.3.2 rejects method
+        ``install`` for an already-installed package with reserved error 120.
+        The requests mirror what Package Center's ``_onRequestDownload`` and
+        ``_onRequestQuickInstall`` send (captured from PkgManApp.js).
+
+        Missing dependency packages are fresh-installed first, exactly like
+        Package Center's wizard (verified live: Contacts 1.0.11 requires
+        Node.js_v22; DSM answers the pre-upgrade check with error 4526 until
+        it is installed).
+
+        Reconnects first: the shared SID is often stale by the time the user
+        clicks Install (the coordinator only polls every 6 hours).
+        """
+        self.reconnect()
+        pkg_info = self._installable_info(package_id)
+        _LOGGER.debug("Upgrading package %s to %s", package_id, pkg_info.get("version", ""))
+
+        missing: list[str] = []
+        for _ in range(3):
+            missing = self._missing_dependencies(pkg_info)
+            if not missing:
+                break
+            for dep_id in missing:
+                _LOGGER.info("Package %s requires %s; installing it first", package_id, dep_id)
+                self._run_package_operation(dep_id, self._installable_info(dep_id), "install")
+        else:
+            raise RuntimeError(
+                f"Package {package_id} still has unmet dependencies after installing {missing}"
+            )
+
+        self._run_package_operation(package_id, pkg_info, "upgrade")
 
     def trigger_security_scan(self) -> None:
         """Trigger a Security Advisor scan.

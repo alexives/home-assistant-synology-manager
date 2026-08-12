@@ -1,5 +1,6 @@
 """Tests for the Synology API client wrapper."""
 
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1980,6 +1981,7 @@ class TestPackageUpgrade:
             verify_ssl=False,
         )
         client.connect()
+        client._installation_check = MagicMock(return_value={"success": True})
         return client, pkg, sysinfo
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
@@ -2092,6 +2094,228 @@ class TestPackageUpgrade:
         client.upgrade_package("HybridShare")
 
         assert mock_package_cls.call_count == 2
+
+
+class TestPackageUpgradeDependencies:
+    """The upgrade flow must install missing dependency packages first.
+
+    Package Center's wizard runs SYNO.Core.Package.Installation ``check`` v2
+    before an upgrade; DSM answers error 4526 with ``errors.uninstall_packages``
+    listing dependency packages to install (verified live: Contacts 1.0.11
+    requires Node.js_v22). Without that step the quick-upgrade request fails.
+    """
+
+    CONTACTS: ClassVar[dict] = {
+        "id": "Contacts",
+        "version": "1.0.11-20661",
+        "link": "https://example.com/contacts.spk",
+        "md5": "c0ffee",
+        "size": 8807790,
+        "type": 0,
+        "beta": False,
+        "source": "syno",
+        "deppkgs": {"Node.js_v22": "", "SynologyApplicationService": {">=": "1.8.0-20663"}},
+        "depsers": "pgsql-adapter.service",
+    }
+    NODEJS: ClassVar[dict] = {
+        "id": "Node.js_v22",
+        "version": "22.14.0-1000",
+        "link": "https://example.com/node22.spk",
+        "md5": "beef",
+        "size": 999,
+        "type": 0,
+        "beta": False,
+        "source": "syno",
+    }
+    CHECK_MISSING_DEP: ClassVar[dict] = {
+        "success": False,
+        "error": {
+            "code": 4526,
+            "errors": {
+                "uninstall_packages": {"Node.js_v22": ""},
+                "unstart_packages": "",
+                "volume_count": 1,
+            },
+        },
+    }
+
+    def _make_client(self, mock_package_cls, mock_sysinfo_cls, installable=None):
+        pkg = MagicMock()
+        pkg.list_installable.return_value = {
+            "data": {
+                "packages": installable if installable is not None else [self.CONTACTS, self.NODEJS]
+            }
+        }
+        pkg.request_data.return_value = {"data": {"taskid": "@SYNOPKG_DOWNLOAD", "progress": 0.0}}
+        pkg.get_dowload_package_status.return_value = {"data": {"finished": True, "progress": 1.0}}
+        pkg.check_installation.return_value = {"data": {"volume_path": "/volume1"}}
+        mock_package_cls.return_value = pkg
+
+        sysinfo = MagicMock()
+        sysinfo.installed_package_list.return_value = {
+            "data": {
+                "packages": [
+                    {"id": "Contacts", "version": "1.0.11-20661"},
+                    {"id": "Node.js_v22", "version": "22.14.0-1000"},
+                ]
+            }
+        }
+        mock_sysinfo_cls.return_value = sysinfo
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+        return client, pkg
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_missing_dependency_installed_before_upgrade(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Node.js_v22 gets a full fresh install (method "install") before the
+        Contacts upgrade requests go out (method "upgrade")."""
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            side_effect=[self.CHECK_MISSING_DEP, {"success": True}]
+        )
+
+        client.upgrade_package("Contacts")
+
+        calls = pkg.request_data.call_args_list
+        assert len(calls) == 4
+        dep_download = calls[0].args[2]
+        assert dep_download["name"] == "Node.js_v22"
+        assert dep_download["method"] == "install"
+        assert dep_download["operation"] == "install"
+        assert dep_download["url"] == "https://example.com/node22.spk"
+        dep_install = calls[1].args[2]
+        assert dep_install["name"] == "Node.js_v22"
+        assert dep_install["method"] == "install"
+        assert dep_install["blqinst"] is True
+        upgrade_download = calls[2].args[2]
+        assert upgrade_download["name"] == "Contacts"
+        assert upgrade_download["method"] == "upgrade"
+        upgrade_install = calls[3].args[2]
+        assert upgrade_install["name"] == "Contacts"
+        assert upgrade_install["method"] == "upgrade"
+        assert upgrade_install["blqinst"] is True
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_no_missing_dependencies_upgrades_directly(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(return_value={"success": True})
+
+        client.upgrade_package("Contacts")
+
+        assert len(pkg.request_data.call_args_list) == 2
+        assert all(c.args[2]["name"] == "Contacts" for c in pkg.request_data.call_args_list)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_empty_uninstall_packages_means_no_missing_deps(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """DSM sends uninstall_packages as "" (empty string) when nothing is missing."""
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            return_value={
+                "success": False,
+                "error": {"code": 4526, "errors": {"uninstall_packages": "", "volume_count": 1}},
+            }
+        )
+
+        client.upgrade_package("Contacts")
+
+        assert len(pkg.request_data.call_args_list) == 2
+        assert all(c.args[2]["name"] == "Contacts" for c in pkg.request_data.call_args_list)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_check_failure_proceeds_with_upgrade(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls, caplog
+    ):
+        """The check is best-effort: if it errors, log and let the upgrade try."""
+        import logging
+
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(side_effect=ConnectionResetError())
+
+        with caplog.at_level(logging.WARNING):
+            client.upgrade_package("Contacts")
+
+        assert len(pkg.request_data.call_args_list) == 2
+        assert any("check" in r.message.lower() for r in caplog.records)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_persistently_missing_dependencies_raise(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """If deps stay missing after installing them, fail instead of looping."""
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(return_value=self.CHECK_MISSING_DEP)
+
+        with pytest.raises(RuntimeError, match="dependenc"):
+            client.upgrade_package("Contacts")
+
+        # never reached the Contacts upgrade requests
+        assert all(c.args[2]["name"] != "Contacts" for c in pkg.request_data.call_args_list)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_missing_dependency_not_installable_raises(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """A dependency absent from the feed must fail with its name in the error."""
+        client, _pkg = self._make_client(
+            mock_package_cls, mock_sysinfo_cls, installable=[self.CONTACTS]
+        )
+        client._installation_check = MagicMock(return_value=self.CHECK_MISSING_DEP)
+
+        with pytest.raises(RuntimeError, match=r"Node\.js_v22"):
+            client.upgrade_package("Contacts")
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_installation_check_json_encodes_string_params(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """DSM rejects bare string params with error 120 reason "type" - every
+        string must go out JSON-encoded (verified live), like SecurityScan's items."""
+        from unittest.mock import patch as mock_patch
+
+        client, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        response = MagicMock()
+        response.json.return_value = {"success": True}
+        with mock_patch("requests.post", return_value=response) as mock_post:
+            result = client._installation_check(self.CONTACTS)
+
+        assert result == {"success": True}
+        form = mock_post.call_args.kwargs["data"]
+        assert form["api"] == "SYNO.Core.Package.Installation"
+        assert form["method"] == "check"
+        assert form["version"] == "2"
+        assert form["id"] == '"Contacts"'
+        assert form["ver"] == '"1.0.11-20661"'
+        assert form["depsers"] == '"pgsql-adapter.service"'
+        assert "Node.js_v22" in form["deppkgs"]
 
 
 class TestTriggerSecurityScan:
