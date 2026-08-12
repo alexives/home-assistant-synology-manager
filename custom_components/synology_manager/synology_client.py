@@ -21,6 +21,15 @@ except ImportError:
     DockerApi = None  # type: ignore[assignment,misc]
 
 
+# DSM sends these codes without any error payload on package endpoints;
+# keep them readable (the library's table had entries for them).
+_DSM_ERROR_HINTS = {
+    101: "no parameter of API, method or version",
+    119: "invalid session / SID not found",
+    120: "invalid parameter",
+}
+
+
 class SynologyAuthenticationError(Exception):
     """Raised when authentication fails."""
 
@@ -754,57 +763,158 @@ class SynologyClient:
             return True
         return not dsm.update_available
 
-    def _installation_request(self, package_id: str, step: str, params: dict) -> dict:
-        """Call ``SYNO.Core.Package.Installation``, surfacing the DSM error code.
+    def _raw_entry_post(
+        self,
+        api: str,
+        version: int | str,
+        method: str,
+        payload: dict[str, Any],
+        timeout: tuple[int, int] = (10, 60),
+    ) -> dict:
+        """POST to entry.cgi with X-SYNO-TOKEN, JSON-encoding every payload value.
 
-        The library maps reserved DSM error codes (112-149) to the placeholder
-        text "Preserve for other purpose" and drops the number, so re-raise
-        with the step name and numeric code to keep failures diagnosable.
-        Library exceptions may stringify to "" (the text lives in
-        ``error_message``), so never rely on ``str(err)`` alone.
+        The library's transport can't make some of these requests, all
+        verified live: its GET trips method ``install``'s stricter validation
+        (error 120), its POST never attaches X-SYNO-TOKEN (error 119 even on
+        a fresh SID), and Python bools serialize to "True"/"False", which DSM
+        rejects with 120 reason "type" - DSM's own UI JSON-stringifies every
+        non-string param. Returns the parsed response without raising on
+        success=false: some callers need the error payload the library drops.
         """
+        import requests as req_lib
+
+        session = self._package.session
+        form: dict[str, Any] = {
+            "api": api,
+            "version": str(version),
+            "method": method,
+            "_sid": session._sid,
+        }
+        for key, value in payload.items():
+            form[key] = json.dumps(value)
+        scheme = "https" if self._secure else "http"
+        resp = req_lib.post(
+            f"{scheme}://{self._host}:{self._port}/webapi/entry.cgi",
+            data=form,
+            verify=self._verify_ssl,
+            headers={"X-SYNO-TOKEN": session._syno_token},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _installation_request(self, package_id: str, step: str, params: dict) -> dict:
+        """Send a ``SYNO.Core.Package.Installation`` write, surfacing DSM errors.
+
+        Raw responses keep the error payload the library drops -
+        ``errors.name``/``reason`` say which param DSM disliked, and
+        reserved-range codes keep their number.
+        """
+        payload = dict(params)
+        method = payload.pop("method", "")
+        version = payload.pop("version", 1)
         try:
-            return self._package.request_data(
-                "SYNO.Core.Package.Installation", "entry.cgi", dict(params)
+            # Generous read timeout: DSM applies quick install/upgrade
+            # requests synchronously enough that responses can take a while.
+            result = self._raw_entry_post(
+                "SYNO.Core.Package.Installation",
+                version,
+                method,
+                payload,
+                timeout=(10, 600),
             )
         except Exception as err:
             detail = _err_detail(err)
             _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
             raise RuntimeError(f"Package {package_id} {step} failed: {detail}") from err
+        if not result.get("success"):
+            error = result.get("error", {})
+            code = error.get("code")
+            detail_body = error.get("errors") or _DSM_ERROR_HINTS.get(code, "no detail")
+            detail = f"DSM error {code}: {detail_body}"
+            _LOGGER.warning("Package %s %s failed: %s", package_id, step, detail)
+            raise RuntimeError(f"Package {package_id} {step} failed: {detail}")
+        return result
 
-    def upgrade_package(self, package_id: str) -> None:
-        """Upgrade a package via the DSM download-then-upgrade flow.
+    def _installable_map(self) -> dict[str, dict]:
+        """Fetch the installable feed once, keyed by package id."""
+        response = self._package.list_installable()
+        packages = response.get("data", {}).get("packages", [])
+        return {p.get("id"): p for p in packages if isinstance(p, dict)}
 
-        Both write requests use method ``upgrade``: DSM 7.3.2 rejects method
-        ``install`` for an already-installed package with reserved error 120.
-        The requests mirror what Package Center's ``_onRequestDownload`` and
-        ``_onRequestQuickInstall`` send (captured from PkgManApp.js).
+    def _installation_check(self, pkg_info: dict) -> dict:
+        """Mirror Package Center's pre-upgrade check, keeping the error payload.
 
-        Reconnects first: the shared SID is often stale by the time the user
-        clicks Install (the coordinator only polls every 6 hours).
+        ``SYNO.Core.Package.Installation`` ``check`` v2 answers error 4526
+        whose ``errors.uninstall_packages`` lists the dependency packages the
+        wizard would install first (verified live: Contacts 1.0.11 requires
+        Node.js_v22), so success=false is an expected answer here.
+        """
+        payload: dict[str, Any] = {
+            "id": pkg_info.get("id", ""),
+            "ver": pkg_info.get("version", ""),
+            "blupgrade": True,
+        }
+        for key in ("deppkgs", "depsers", "conflictpkgs", "breakpkgs", "replacepkgs"):
+            value = pkg_info.get(key)
+            if value is not None:
+                payload[key] = value
+        return self._raw_entry_post("SYNO.Core.Package.Installation", 2, "check", payload)
+
+    def _missing_dependencies(self, pkg_info: dict) -> list[str]:
+        """Dependency packages that must be installed before this upgrade.
+
+        Best-effort: if the check itself fails, proceed and let the upgrade
+        surface its own error. DSM sends ``uninstall_packages`` as a dict of
+        missing package ids, or "" when nothing is missing - tolerate any
+        shape, since empty collections arrive as "" in this payload.
+        """
+        try:
+            result = self._installation_check(pkg_info)
+        except Exception as err:
+            _LOGGER.warning(
+                "Pre-upgrade dependency check for %s failed, proceeding without it: %s",
+                pkg_info.get("id"),
+                _err_detail(err),
+            )
+            return []
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        errors_payload = error.get("errors")
+        missing = (
+            errors_payload.get("uninstall_packages") if isinstance(errors_payload, dict) else None
+        )
+        if isinstance(missing, (dict, list)) and missing:
+            return list(missing)
+        if not result.get("success") and error.get("code") != 4526:
+            # 4526 is the expected "wizard info" answer; anything else means
+            # the check itself misfired - don't let best-effort hide it.
+            _LOGGER.warning(
+                "Pre-upgrade dependency check for %s returned DSM error %s, proceeding without it",
+                pkg_info.get("id"),
+                error.get("code"),
+            )
+        return []
+
+    def _run_package_operation(self, package_id: str, pkg_info: dict, method: str) -> None:
+        """Download an SPK then apply it via Package Center's quick request.
+
+        ``method`` is ``upgrade`` for installed packages and ``install`` for
+        new ones (dependencies) - the same split Package Center makes.
         """
         import time
-
-        self.reconnect()
-        response = self._package.list_installable()
-        installable = response.get("data", {}).get("packages", [])
-        pkg_info = next((p for p in installable if p.get("id") == package_id), None)
-        if pkg_info is None:
-            raise RuntimeError(f"Package {package_id} not found in installable list")
 
         target_ver = pkg_info.get("version", "")
         is_syno = pkg_info.get("source") == "syno"
         beta = bool(pkg_info.get("beta", False))
-        _LOGGER.debug("Upgrading package %s to %s", package_id, target_ver)
 
         # Step 1: download the SPK to the NAS; this returns a task id.
         download = self._installation_request(
             package_id,
             "download",
             {
-                "method": "upgrade",
+                "method": method,
                 "version": 1,
-                "operation": "upgrade",
+                "operation": method,
                 "name": package_id,
                 "url": pkg_info.get("link", ""),
                 "checksum": pkg_info.get("md5", ""),
@@ -835,12 +945,12 @@ class SynologyClient:
             self._package.check_installation(package_id).get("data", {}).get("volume_path", "")
         )
 
-        # Step 4: install the downloaded package via the quick-upgrade request.
+        # Step 4: apply the downloaded package via the quick install/upgrade request.
         self._installation_request(
             package_id,
             "install",
             {
-                "method": "upgrade",
+                "method": method,
                 "version": 1,
                 "name": package_id,
                 "blqinst": True,
@@ -859,7 +969,56 @@ class SynologyClient:
                     return
             time.sleep(2)
 
-        _LOGGER.warning("Package %s upgrade did not complete within timeout", package_id)
+        if method == "install":
+            # A dependency that never confirms would be blindly re-downloaded
+            # and re-installed by the caller's retry loop; fail it instead.
+            raise RuntimeError(f"Package {package_id} install did not complete within timeout")
+        _LOGGER.warning("Package %s %s did not complete within timeout", package_id, method)
+
+    def upgrade_package(self, package_id: str) -> None:
+        """Upgrade a package via the DSM download-then-upgrade flow.
+
+        Both write requests use method ``upgrade``: DSM 7.3.2 rejects method
+        ``install`` for an already-installed package with reserved error 120.
+        The requests mirror what Package Center's ``_onRequestDownload`` and
+        ``_onRequestQuickInstall`` send (captured from PkgManApp.js).
+
+        Missing dependency packages are fresh-installed first, exactly like
+        Package Center's wizard (verified live: Contacts 1.0.11 requires
+        Node.js_v22; DSM answers the pre-upgrade check with error 4526 until
+        it is installed).
+
+        Reconnects first: the shared SID is often stale by the time the user
+        clicks Install (the coordinator only polls every 6 hours).
+        """
+        self.reconnect()
+        feed = self._installable_map()
+        pkg_info = feed.get(package_id)
+        if pkg_info is None:
+            raise RuntimeError(f"Package {package_id} not found in installable list")
+        _LOGGER.debug("Upgrading package %s to %s", package_id, pkg_info.get("version", ""))
+
+        # The raise must come from a re-check, never right after an install -
+        # installing on the final round and then failing would report an
+        # upgrade that may have just become viable.
+        for attempt in range(3):
+            missing = self._missing_dependencies(pkg_info)
+            if not missing:
+                break
+            if attempt == 2:
+                raise RuntimeError(
+                    f"Package {package_id} still has unmet dependencies after installing {missing}"
+                )
+            for dep_id in missing:
+                dep_info = feed.get(dep_id)
+                if dep_info is None:
+                    raise RuntimeError(
+                        f"Dependency {dep_id} of {package_id} not found in installable list"
+                    )
+                _LOGGER.info("Package %s requires %s; installing it first", package_id, dep_id)
+                self._run_package_operation(dep_id, dep_info, "install")
+
+        self._run_package_operation(package_id, pkg_info, "upgrade")
 
     def trigger_security_scan(self) -> None:
         """Trigger a Security Advisor scan.

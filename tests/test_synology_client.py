@@ -1,5 +1,6 @@
 """Tests for the Synology API client wrapper."""
 
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1937,8 +1938,26 @@ class TestDisplayNameHelpers:
         assert _is_newer("1.5.2-1831", "1.5.2-1832") is False
 
 
+def _post_response(payload):
+    """Build a mocked requests.Response with the given JSON payload."""
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+def _post_download_ok(*_args, **_kwargs):
+    """Default requests.post stub: every Installation request succeeds."""
+    return _post_response(
+        {"success": True, "data": {"taskid": "@SYNOPKG_DOWNLOAD", "progress": 0.0}}
+    )
+
+
 class TestPackageUpgrade:
-    """Tests for the package upgrade flow."""
+    """Tests for the package upgrade flow.
+
+    The Installation write requests go out as raw POSTs (with X-SYNO-TOKEN
+    and JSON-encoded params), so assertions target the requests.post forms.
+    """
 
     def _make_client(self, mock_package_cls, mock_sysinfo_cls, target="1.5.2-1832"):
         pkg = MagicMock()
@@ -1957,9 +1976,6 @@ class TestPackageUpgrade:
                     }
                 ]
             }
-        }
-        pkg.request_data.return_value = {
-            "data": {"taskid": "@SYNOPKG_DOWNLOAD_HybridShare", "progress": 0.0}
         }
         pkg.get_dowload_package_status.return_value = {"data": {"finished": True, "progress": 1.0}}
         pkg.check_installation.return_value = {"data": {"volume_path": "/volume1"}}
@@ -1980,6 +1996,7 @@ class TestPackageUpgrade:
             verify_ssl=False,
         )
         client.connect()
+        client._installation_check = MagicMock(return_value={"success": True})
         return client, pkg, sysinfo
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
@@ -1992,24 +2009,32 @@ class TestPackageUpgrade:
 
         DSM 7.3.2 rejects method "install" for an already-installed package
         with reserved error 120; Package Center sends method "upgrade".
+        Payload values go out JSON-encoded via POST with X-SYNO-TOKEN: the
+        library's GET trips method install's validation (error 120) and its
+        POST omits the token (error 119), both verified live.
         """
         client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
 
-        client.upgrade_package("HybridShare")
+        with patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("HybridShare")
 
-        download_call = pkg.request_data.call_args_list[0]
-        assert download_call.args[0] == "SYNO.Core.Package.Installation"
-        download_params = download_call.args[2]
-        assert download_params["method"] == "upgrade"
-        assert download_params["operation"] == "upgrade"
-        assert download_params["name"] == "HybridShare"
-        assert download_params["url"] == "https://example.com/hs.spk"
-        assert download_params["checksum"] == "deadbeef"
-        assert download_params["filesize"] == 12345
-        assert download_params["is_syno"] is True
-        assert download_params["beta"] is False
+        download = mock_post.call_args_list[0]
+        form = download.kwargs["data"]
+        assert form["api"] == "SYNO.Core.Package.Installation"
+        assert form["method"] == "upgrade"
+        assert form["operation"] == '"upgrade"'
+        assert form["name"] == '"HybridShare"'
+        assert form["url"] == '"https://example.com/hs.spk"'
+        assert form["checksum"] == '"deadbeef"'
+        assert form["filesize"] == "12345"
+        assert form["is_syno"] == "true"
+        assert form["beta"] == "false"
+        assert form["blqinst"] == "false"
+        assert download.kwargs["headers"]["X-SYNO-TOKEN"] == client._package.session._syno_token
+        # A hung NAS must not block the executor thread forever
+        assert download.kwargs["timeout"] is not None
         # Poll the download status with the returned task id
-        pkg.get_dowload_package_status.assert_called_with("@SYNOPKG_DOWNLOAD_HybridShare")
+        pkg.get_dowload_package_status.assert_called_with("@SYNOPKG_DOWNLOAD")
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2018,20 +2043,20 @@ class TestPackageUpgrade:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """After download, install via Package Center's quick-upgrade request."""
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
 
-        client.upgrade_package("HybridShare")
+        with patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("HybridShare")
 
-        assert pkg.request_data.call_count == 2
-        install_call = pkg.request_data.call_args_list[1]
-        assert install_call.args[0] == "SYNO.Core.Package.Installation"
-        install_params = install_call.args[2]
-        assert install_params["method"] == "upgrade"
-        assert install_params["name"] == "HybridShare"
-        assert install_params["blqinst"] is True
-        assert install_params["volume_path"] == "/volume1"
-        assert install_params["installrunpackage"] is True
-        assert "url" not in install_params
+        assert mock_post.call_count == 2
+        form = mock_post.call_args_list[1].kwargs["data"]
+        assert form["api"] == "SYNO.Core.Package.Installation"
+        assert form["method"] == "upgrade"
+        assert form["name"] == '"HybridShare"'
+        assert form["blqinst"] == "true"
+        assert form["volume_path"] == '"/volume1"'
+        assert form["installrunpackage"] == "true"
+        assert "url" not in form
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -2040,31 +2065,54 @@ class TestPackageUpgrade:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """If the download step returns no task id, fail loudly instead of silently."""
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        pkg.request_data.return_value = {"data": {}}
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
 
-        with pytest.raises(RuntimeError):
+        with (
+            patch(
+                "requests.post",
+                return_value=_post_response({"success": True, "data": {}}),
+            ) as mock_post,
+            pytest.raises(RuntimeError),
+        ):
             client.upgrade_package("HybridShare")
-        assert pkg.request_data.call_count == 1
+        assert mock_post.call_count == 1
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
     @patch("custom_components.synology_manager.synology_client.DockerApi")
     def test_upgrade_surfaces_dsm_error_code(self, mock_docker, mock_package_cls, mock_sysinfo_cls):
-        """API failures must report the step and numeric DSM error code.
+        """API failures must report the step, numeric DSM error code, and the
+        error payload (DSM's errors dict names the offending param - the
+        library used to drop all of it)."""
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        error_response = _post_response(
+            {
+                "success": False,
+                "error": {"code": 120, "errors": {"name": "blqinst", "reason": "type"}},
+            }
+        )
 
-        The library maps reserved DSM codes (112-149) to the placeholder text
-        "Preserve for other purpose" and drops the number. Its exceptions can
-        stringify to "" (the text lives in .error_message), so mimic that.
-        """
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        err = Exception()
-        err.error_code = 120
-        err.error_message = "Preserve for other purpose"
-        pkg.request_data.side_effect = err
+        with (
+            patch("requests.post", return_value=error_response),
+            pytest.raises(RuntimeError, match=r"download failed: DSM error 120.*blqinst"),
+        ):
+            client.upgrade_package("HybridShare")
 
-        with pytest.raises(
-            RuntimeError, match=r"download failed: DSM error 120: Preserve for other purpose"
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_payload_less_error_gets_known_code_hint(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Errors without a payload (e.g. 119) must keep a readable meaning -
+        the library's table mapped 119 to 'Invalid session'; don't regress to
+        'no detail' for codes we know."""
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        error_response = _post_response({"success": False, "error": {"code": 119}})
+
+        with (
+            patch("requests.post", return_value=error_response),
+            pytest.raises(RuntimeError, match=r"DSM error 119.*[sS]ession"),
         ):
             client.upgrade_package("HybridShare")
 
@@ -2075,10 +2123,12 @@ class TestPackageUpgrade:
         self, mock_docker, mock_package_cls, mock_sysinfo_cls
     ):
         """Errors lacking error_code/error_message must not produce an empty detail."""
-        client, pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
-        pkg.request_data.side_effect = ConnectionResetError()
+        client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
 
-        with pytest.raises(RuntimeError, match=r"download failed: ConnectionResetError"):
+        with (
+            patch("requests.post", side_effect=ConnectionResetError()),
+            pytest.raises(RuntimeError, match=r"download failed: ConnectionResetError"),
+        ):
             client.upgrade_package("HybridShare")
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
@@ -2089,9 +2139,347 @@ class TestPackageUpgrade:
         client, _pkg, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
         assert mock_package_cls.call_count == 1
 
-        client.upgrade_package("HybridShare")
+        with patch("requests.post", side_effect=_post_download_ok):
+            client.upgrade_package("HybridShare")
 
         assert mock_package_cls.call_count == 2
+
+
+class TestPackageUpgradeDependencies:
+    """The upgrade flow must install missing dependency packages first.
+
+    Package Center's wizard runs SYNO.Core.Package.Installation ``check`` v2
+    before an upgrade; DSM answers error 4526 with ``errors.uninstall_packages``
+    listing dependency packages to install (verified live: Contacts 1.0.11
+    requires Node.js_v22). Without that step the quick-upgrade request fails.
+    """
+
+    CONTACTS: ClassVar[dict] = {
+        "id": "Contacts",
+        "version": "1.0.11-20661",
+        "link": "https://example.com/contacts.spk",
+        "md5": "c0ffee",
+        "size": 8807790,
+        "type": 0,
+        "beta": False,
+        "source": "syno",
+        "deppkgs": {"Node.js_v22": "", "SynologyApplicationService": {">=": "1.8.0-20663"}},
+        "depsers": "pgsql-adapter.service",
+    }
+    NODEJS: ClassVar[dict] = {
+        "id": "Node.js_v22",
+        "version": "22.14.0-1000",
+        "link": "https://example.com/node22.spk",
+        "md5": "beef",
+        "size": 999,
+        "type": 0,
+        "beta": False,
+        "source": "syno",
+    }
+    CHECK_MISSING_DEP: ClassVar[dict] = {
+        "success": False,
+        "error": {
+            "code": 4526,
+            "errors": {
+                "uninstall_packages": {"Node.js_v22": ""},
+                "unstart_packages": "",
+                "volume_count": 1,
+            },
+        },
+    }
+
+    def _make_client(self, mock_package_cls, mock_sysinfo_cls, installable=None):
+        pkg = MagicMock()
+        pkg.list_installable.return_value = {
+            "data": {
+                "packages": installable if installable is not None else [self.CONTACTS, self.NODEJS]
+            }
+        }
+        pkg.get_dowload_package_status.return_value = {"data": {"finished": True, "progress": 1.0}}
+        pkg.check_installation.return_value = {"data": {"volume_path": "/volume1"}}
+        mock_package_cls.return_value = pkg
+
+        sysinfo = MagicMock()
+        sysinfo.installed_package_list.return_value = {
+            "data": {
+                "packages": [
+                    {"id": "Contacts", "version": "1.0.11-20661"},
+                    {"id": "Node.js_v22", "version": "22.14.0-1000"},
+                ]
+            }
+        }
+        mock_sysinfo_cls.return_value = sysinfo
+
+        client = SynologyClient(
+            host="nas.local",
+            port=5001,
+            username="admin",
+            password="secret",
+            secure=True,
+            verify_ssl=False,
+        )
+        client.connect()
+        return client, pkg
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_missing_dependency_installed_before_upgrade(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Node.js_v22 gets a full fresh install (method "install") before the
+        Contacts upgrade requests go out (method "upgrade")."""
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            side_effect=[self.CHECK_MISSING_DEP, {"success": True}]
+        )
+
+        with patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
+
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 4
+        assert forms[0]["name"] == '"Node.js_v22"'
+        assert forms[0]["method"] == "install"
+        assert forms[0]["operation"] == '"install"'
+        assert forms[0]["url"] == '"https://example.com/node22.spk"'
+        assert forms[1]["name"] == '"Node.js_v22"'
+        assert forms[1]["method"] == "install"
+        assert forms[1]["blqinst"] == "true"
+        assert forms[2]["name"] == '"Contacts"'
+        assert forms[2]["method"] == "upgrade"
+        assert forms[3]["name"] == '"Contacts"'
+        assert forms[3]["method"] == "upgrade"
+        assert forms[3]["blqinst"] == "true"
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_no_missing_dependencies_upgrades_directly(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(return_value={"success": True})
+
+        with patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
+
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 2
+        assert all(f["name"] == '"Contacts"' for f in forms)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_empty_uninstall_packages_means_no_missing_deps(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """DSM sends uninstall_packages as "" (empty string) when nothing is missing."""
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            return_value={
+                "success": False,
+                "error": {"code": 4526, "errors": {"uninstall_packages": "", "volume_count": 1}},
+            }
+        )
+
+        with patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
+
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 2
+        assert all(f["name"] == '"Contacts"' for f in forms)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_check_failure_proceeds_with_upgrade(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls, caplog
+    ):
+        """The check is best-effort: if it errors, log and let the upgrade try."""
+        import logging
+
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(side_effect=ConnectionResetError())
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("requests.post", side_effect=_post_download_ok) as mock_post,
+        ):
+            client.upgrade_package("Contacts")
+
+        assert mock_post.call_count == 2
+        assert any("check" in r.message.lower() for r in caplog.records)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_persistently_missing_dependencies_raise(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """If deps stay missing after installing them, fail instead of looping.
+
+        The raise must come from a re-check, not right after an install: two
+        install rounds (4 posts), each followed by a check, then give up.
+        """
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(return_value=self.CHECK_MISSING_DEP)
+
+        with (
+            patch("requests.post", side_effect=_post_download_ok) as mock_post,
+            pytest.raises(RuntimeError, match="dependenc"),
+        ):
+            client.upgrade_package("Contacts")
+
+        # never reached the Contacts upgrade requests
+        assert all(c.kwargs["data"]["name"] != '"Contacts"' for c in mock_post.call_args_list)
+        # two install rounds (download + quick install each), three checks
+        assert mock_post.call_count == 4
+        assert client._installation_check.call_count == 3
+
+    @patch("time.sleep")
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_dependency_install_timeout_raises(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls, mock_sleep
+    ):
+        """A dep that never confirms installed must raise, not warn-and-return.
+
+        Warn-and-return (the upgrade path's behavior) would send the loop
+        back to the check, which re-downloads and re-installs the whole SPK
+        against a NAS that is already stuck.
+        """
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(return_value=self.CHECK_MISSING_DEP)
+        client._sysinfo.installed_package_list.return_value = {
+            "data": {"packages": [{"id": "Contacts", "version": "1.0.10-20659"}]}
+        }
+
+        with (
+            patch("requests.post", side_effect=_post_download_ok) as mock_post,
+            pytest.raises(RuntimeError, match=r"Node\.js_v22"),
+        ):
+            client.upgrade_package("Contacts")
+
+        # one install round only - no blind re-download of the hung dep
+        assert mock_post.call_count == 2
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_non_dict_errors_payload_does_not_crash(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """DSM sends empty collections as "" - a non-dict errors field must not
+        abort the best-effort check with an AttributeError."""
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            return_value={"success": False, "error": {"code": 4526, "errors": ""}}
+        )
+
+        with patch("requests.post", side_effect=_post_download_ok) as mock_post:
+            client.upgrade_package("Contacts")
+
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert len(forms) == 2
+        assert all(f["name"] == '"Contacts"' for f in forms)
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_installable_feed_fetched_once(self, mock_docker, mock_package_cls, mock_sysinfo_cls):
+        """Dependency lookups reuse the already-fetched catalog instead of
+        re-fetching the full Package Center feed per dep per round."""
+        client, pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            side_effect=[self.CHECK_MISSING_DEP, {"success": True}]
+        )
+
+        with patch("requests.post", side_effect=_post_download_ok):
+            client.upgrade_package("Contacts")
+
+        assert pkg.list_installable.call_count == 1
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_missing_dependency_not_installable_raises(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """A dependency absent from the feed must fail with its name in the error."""
+        client, _pkg = self._make_client(
+            mock_package_cls, mock_sysinfo_cls, installable=[self.CONTACTS]
+        )
+        client._installation_check = MagicMock(return_value=self.CHECK_MISSING_DEP)
+
+        with pytest.raises(RuntimeError, match=r"Node\.js_v22"):
+            client.upgrade_package("Contacts")
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_installation_check_json_encodes_string_params(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """DSM rejects bare string params with error 120 reason "type" - every
+        string must go out JSON-encoded (verified live), like SecurityScan's items."""
+        client, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        with patch("requests.post", return_value=_post_response({"success": True})) as mock_post:
+            result = client._installation_check(self.CONTACTS)
+
+        assert result == {"success": True}
+        form = mock_post.call_args.kwargs["data"]
+        assert form["api"] == "SYNO.Core.Package.Installation"
+        assert form["method"] == "check"
+        assert form["version"] == "2"
+        assert form["id"] == '"Contacts"'
+        assert form["ver"] == '"1.0.11-20661"'
+        assert form["depsers"] == '"pgsql-adapter.service"'
+        assert "Node.js_v22" in form["deppkgs"]
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_installation_check_sends_syno_token_header(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls
+    ):
+        """Without X-SYNO-TOKEN the check fails with error 119 even on a fresh
+        SID (verified live) - the library's session logs in with a token and
+        DSM requires it on POSTs, same as _compound_request."""
+        client, _ = self._make_client(mock_package_cls, mock_sysinfo_cls)
+
+        with patch("requests.post", return_value=_post_response({"success": True})) as mock_post:
+            client._installation_check(self.CONTACTS)
+
+        headers = mock_post.call_args.kwargs["headers"]
+        assert headers["X-SYNO-TOKEN"] == client._package.session._syno_token
+
+    @patch("custom_components.synology_manager.synology_client.SysInfo")
+    @patch("custom_components.synology_manager.synology_client.Package")
+    @patch("custom_components.synology_manager.synology_client.DockerApi")
+    def test_unexpected_check_error_logs_warning_and_proceeds(
+        self, mock_docker, mock_package_cls, mock_sysinfo_cls, caplog
+    ):
+        """A check failure other than 4526 must be visible, not silently
+        treated as "no missing dependencies" (a swallowed 119 masked the
+        Contacts failure on first live validation)."""
+        import logging
+
+        client, _pkg = self._make_client(mock_package_cls, mock_sysinfo_cls)
+        client._installation_check = MagicMock(
+            return_value={"success": False, "error": {"code": 119}}
+        )
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("requests.post", side_effect=_post_download_ok) as mock_post,
+        ):
+            client.upgrade_package("Contacts")
+
+        assert mock_post.call_count == 2  # proceeded with upgrade
+        assert any("119" in r.message for r in caplog.records)
 
 
 class TestTriggerSecurityScan:
