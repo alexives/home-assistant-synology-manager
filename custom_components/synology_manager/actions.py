@@ -24,6 +24,20 @@ _LOGGER = logging.getLogger(__name__)
 LOGS_URL = f"/config/logs?filter={DOMAIN}"
 
 
+def notify(hass: HomeAssistant, entry_id: str, message: str, *, suffix: str) -> None:
+    """Create/replace this config entry's persistent notification.
+
+    The notification id is stable per entry and purpose, so repeated events
+    replace the notification instead of piling up.
+    """
+    persistent_notification.async_create(
+        hass,
+        message=message,
+        title="Synology Manager",
+        notification_id=f"{DOMAIN}_{entry_id}_{suffix}",
+    )
+
+
 async def run_action(
     hass: HomeAssistant,
     entry_id: str,
@@ -43,14 +57,12 @@ async def run_action(
     except Exception as err:
         detail = _err_detail(err)
         _LOGGER.exception("%s failed: %s", description, detail)
-        persistent_notification.async_create(
+        notify(
             hass,
-            message=(
-                f"{description} failed: {detail}\n\n"
-                f"[Open the logs]({LOGS_URL}) for the full traceback."
-            ),
-            title="Synology Manager",
-            notification_id=f"{DOMAIN}_{entry_id}_action_error",
+            entry_id,
+            f"{description} failed: {detail}\n\n"
+            f"[Open the logs]({LOGS_URL}) for the full traceback.",
+            suffix="action_error",
         )
         raise HomeAssistantError(
             f"{description} failed: {detail} - see Settings > System > Logs "

@@ -109,11 +109,17 @@ class TestDSMUpdateEntity:
     @pytest.mark.asyncio
     async def test_install(self, mock_coordinator):
         """Test triggering DSM upgrade."""
+        from unittest.mock import patch
+
         entity = SynologyDSMUpdateEntity(mock_coordinator)
         entity.hass = MagicMock()
         entity.hass.async_add_executor_job = AsyncMock()
 
-        await entity.async_install(version=None, backup=None)
+        with (
+            patch("custom_components.synology_manager.actions.persistent_notification"),
+            patch("custom_components.synology_manager.update.async_call_later"),
+        ):
+            await entity.async_install(version=None, backup=None)
 
         entity.hass.async_add_executor_job.assert_called_once_with(
             mock_coordinator.client.upgrade_dsm
@@ -133,7 +139,10 @@ class TestDSMUpdateEntity:
         entity.hass = MagicMock()
         entity.hass.async_add_executor_job = AsyncMock()
 
-        with patch("custom_components.synology_manager.update.persistent_notification") as mock_pn:
+        with (
+            patch("custom_components.synology_manager.actions.persistent_notification") as mock_pn,
+            patch("custom_components.synology_manager.update.async_call_later"),
+        ):
             await entity.async_install(version=None, backup=None)
 
         mock_pn.async_create.assert_called_once()
@@ -154,13 +163,41 @@ class TestDSMUpdateEntity:
         )
 
         with (
-            patch("custom_components.synology_manager.update.persistent_notification") as mock_pn,
-            patch("custom_components.synology_manager.actions.persistent_notification"),
+            patch("custom_components.synology_manager.actions.persistent_notification") as mock_pn,
             pytest.raises(HomeAssistantError),
         ):
             await entity.async_install(version=None, backup=None)
 
-        mock_pn.async_create.assert_not_called()
+        assert all(
+            "20 minutes" not in c.kwargs.get("message", "")
+            for c in mock_pn.async_create.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_install_defers_refresh_for_reboot_window(self, mock_coordinator):
+        """No immediate refresh against a NAS that is tearing itself down.
+
+        A failed refresh marks every entity unavailable and HA won't retry for
+        the full 6-hour update_interval, so schedule the refresh for after the
+        ~20-minute upgrade window instead.
+        """
+        from unittest.mock import patch
+
+        entity = SynologyDSMUpdateEntity(mock_coordinator)
+        entity.hass = MagicMock()
+        entity.hass.async_add_executor_job = AsyncMock()
+
+        with (
+            patch("custom_components.synology_manager.actions.persistent_notification"),
+            patch("custom_components.synology_manager.update.async_call_later") as mock_later,
+        ):
+            await entity.async_install(version=None, backup=None)
+
+        mock_coordinator.async_request_refresh.assert_not_called()
+        mock_later.assert_called_once()
+        delay = mock_later.call_args.args[1]
+        delay_seconds = delay.total_seconds() if hasattr(delay, "total_seconds") else delay
+        assert delay_seconds >= 20 * 60
 
 
 class TestPackageUpdateEntity:
