@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from packaging.version import InvalidVersion, Version
@@ -94,6 +94,21 @@ class DsmUpdateInfo:
 
 
 @dataclass
+class UnmetDependency:
+    """An installed dependency package that is older than an update requires."""
+
+    package_id: str
+    name: str
+    requirement: str
+    installed_version: str
+
+    @property
+    def description(self) -> str:
+        """Plain-text description, e.g. "SynoCli Kernel Tools >= 2.0 (installed: 1.3-10)"."""
+        return f"{self.name} {self.requirement} (installed: {self.installed_version})"
+
+
+@dataclass
 class PackageInfo:
     """Installed package information."""
 
@@ -104,6 +119,17 @@ class PackageInfo:
     update_available: bool
     changelog: str | None
     is_running: bool | None
+    third_party: bool = False
+    distributor: str | None = None
+    unmet_dependencies: list[UnmetDependency] = field(default_factory=list)
+
+    @property
+    def blocked_reason(self) -> str | None:
+        """Plain-text reason the update cannot be installed yet, or None."""
+        if not self.unmet_dependencies:
+            return None
+        needs = ", ".join(dep.description for dep in self.unmet_dependencies)
+        return f"Needs {needs}. Update it first."[:255]
 
 
 @dataclass
@@ -182,6 +208,53 @@ def _container_display_name(
     if project_counts.get(project, 1) == 1:
         return _prettify(project)
     return f"{_prettify(project)} - {_prettify(service or container_name)}"
+
+
+def _version_key(version: str) -> tuple[Version, int]:
+    """Sort key for Synology package versions such as "2.0-11" (base version, build)."""
+    base, _, build = version.partition("-")
+    return Version(base), int(build) if build.isdigit() else 0
+
+
+_DEP_OPS = {
+    ">=": lambda a, b: a >= b,
+    ">": lambda a, b: a > b,
+    "<=": lambda a, b: a <= b,
+    "<": lambda a, b: a < b,
+    "=": lambda a, b: a == b,
+    "==": lambda a, b: a == b,
+}
+
+
+def _outdated_dependencies(
+    deppkgs: Any, installed: dict[str, tuple[str, str]]
+) -> list[UnmetDependency]:
+    """Installed dependency packages whose version does not meet the catalog constraint.
+
+    deppkgs comes from the Package Center catalog, e.g.
+    {"synocli-kernel": {">=": "2.0"}}; installed maps package ID to (name, version).
+    Dependencies that are not installed are skipped: upgrade_package() installs
+    those first, as the Package Center wizard does. A constraint that cannot be
+    parsed is treated as met.
+    """
+    if not isinstance(deppkgs, dict):
+        return []
+    outdated = []
+    for dep_id, constraints in deppkgs.items():
+        if dep_id not in installed or not isinstance(constraints, dict):
+            continue
+        name, version = installed[dep_id]
+        for op, required in constraints.items():
+            check = _DEP_OPS.get(op)
+            if check is None:
+                continue
+            try:
+                ok = check(_version_key(version), _version_key(str(required)))
+            except InvalidVersion:
+                continue
+            if not ok:
+                outdated.append(UnmetDependency(dep_id, name, f"{op} {required}", version))
+    return outdated
 
 
 def _is_newer(candidate: str, installed: str) -> bool:
@@ -344,11 +417,15 @@ class SynologyClient:
         installed = self._sysinfo.installed_package_list()
         installed_data = installed.get("data", {}).get("packages", [])
 
-        installable = self._package.list_installable()
-        installable_data = installable.get("data", {}).get("packages", [])
-        installable_map = {pkg["id"]: pkg for pkg in installable_data if isinstance(pkg, dict)}
+        installable_map = self._installable_map()
 
         status_map = self._get_package_status()
+
+        installed_map = {
+            pkg["id"]: (pkg.get("name", pkg["id"]), pkg.get("version", ""))
+            for pkg in installed_data
+            if isinstance(pkg, dict) and pkg.get("id")
+        }
 
         packages = []
         for pkg in installed_data:
@@ -359,6 +436,12 @@ class SynologyClient:
             installable_pkg = installable_map.get(pkg_id, {})
             latest_ver = installable_pkg.get("version", "") if installable_pkg else None
             update_available = _is_newer(latest_ver, installed_ver) if latest_ver else False
+
+            outdated = (
+                _outdated_dependencies(installable_pkg.get("deppkgs"), installed_map)
+                if update_available
+                else []
+            )
 
             pkg_status = status_map.get(pkg_id, {})
             if pkg_status.get("startable"):
@@ -375,6 +458,9 @@ class SynologyClient:
                     update_available=update_available,
                     changelog=installable_pkg.get("changelog") if installable_pkg else None,
                     is_running=is_running,
+                    third_party=installable_pkg.get("source") == "others",
+                    distributor=installable_pkg.get("distributor") or None,
+                    unmet_dependencies=outdated,
                 )
             )
         return packages
@@ -582,6 +668,44 @@ class SynologyClient:
         if not result.get("success"):
             raise RuntimeError(f"{api} {method} failed: {result}")
         return result.get("data", {})
+
+    def _compound_requests(
+        self, requests: list[dict[str, Any]], session, timeout: tuple[int, int] = (10, 600)
+    ) -> list[dict]:
+        """Send several requests in order in one SYNO.Entry.Request call.
+
+        DSM stops at the first failed request; this raises RuntimeError with
+        its result. Returns the data of each request.
+        """
+        import requests as req_lib
+
+        scheme = "https" if self._secure else "http"
+        form = {
+            "api": "SYNO.Entry.Request",
+            "method": "request",
+            "version": 1,
+            "mode": "sequential",
+            "stop_when_error": "true",
+            "compound": json.dumps(requests),
+            "_sid": session._sid,
+        }
+        resp = req_lib.post(
+            f"{scheme}://{self._host}:{self._port}/webapi/entry.cgi",
+            data=form,
+            verify=self._verify_ssl,
+            headers={"X-SYNO-TOKEN": session._syno_token},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("data", {}).get("result", [])
+        for request, result in zip(requests, results, strict=False):
+            if not result.get("success"):
+                raise RuntimeError(f"{request['api']} {request['method']} failed: {result}")
+        if len(results) < len(requests):
+            raise RuntimeError(
+                f"Compound request returned {len(results)} of {len(requests)} results"
+            )
+        return [result.get("data", {}) for result in results]
 
     def _compound_project_request(self, method: str, params: dict | None = None) -> dict:
         """Send a SYNO.Docker.Project request via the compound API."""
@@ -837,10 +961,49 @@ class SynologyClient:
         return result
 
     def _installable_map(self) -> dict[str, dict]:
-        """Fetch the installable feed once, keyed by package id."""
+        """Fetch the installable feed once, keyed by package id.
+
+        Merges the Synology catalog with the third-party catalog (package
+        sources added in Package Center, e.g. SynoCommunity). Synology
+        entries win when an id is in both.
+        """
         response = self._package.list_installable()
         packages = response.get("data", {}).get("packages", [])
-        return {p.get("id"): p for p in packages if isinstance(p, dict)}
+        merged = {p.get("id"): p for p in packages if isinstance(p, dict) and p.get("id")}
+        for pkg in self._third_party_installable():
+            merged.setdefault(pkg["id"], pkg)
+        return merged
+
+    def _third_party_installable(self) -> list[dict]:
+        """Packages from third-party sources (source "others"), best-effort.
+
+        The library's list_installable() sends blloadothers=False, which
+        returns only Synology packages; blloadothers=True returns only the
+        third-party ones, so they need their own request.
+        """
+        api_name = "SYNO.Core.Package.Server"
+        try:
+            info = self._package.core_list[api_name]
+            response = self._package.request_data(
+                api_name,
+                info["path"],
+                req_param={
+                    "method": "list",
+                    "version": info["maxVersion"],
+                    "blforcereload": False,
+                    "blloadothers": True,
+                },
+            )
+            packages = response.get("data", {}).get("packages", [])
+        except Exception as err:
+            _LOGGER.warning(
+                "Third-party package catalog fetch failed, their updates are unavailable: %s",
+                _err_detail(err),
+            )
+            return []
+        if not isinstance(packages, list):
+            return []
+        return [p for p in packages if isinstance(p, dict) and p.get("id")]
 
     def _installation_check(self, pkg_info: dict) -> dict:
         """Mirror Package Center's pre-upgrade check, keeping the error payload.
@@ -945,21 +1108,12 @@ class SynologyClient:
             self._package.check_installation(package_id).get("data", {}).get("volume_path", "")
         )
 
-        # Step 4: apply the downloaded package via the quick install/upgrade request.
-        self._installation_request(
-            package_id,
-            "install",
-            {
-                "method": method,
-                "version": 1,
-                "name": package_id,
-                "blqinst": True,
-                "volume_path": volume_path,
-                "is_syno": is_syno,
-                "beta": beta,
-                "installrunpackage": True,
-            },
-        )
+        if not is_syno:
+            # Third-party packages are usually unsigned; DSM silently ignores the
+            # quick request for them (verified live: SynoCommunity packages).
+            self._apply_downloaded_package(package_id, task_id, method, volume_path)
+        else:
+            self._quick_apply(package_id, method, volume_path, is_syno, beta)
 
         # Step 5: confirm the installed version reaches the target.
         for _ in range(120):
@@ -974,6 +1128,90 @@ class SynologyClient:
             # and re-installed by the caller's retry loop; fail it instead.
             raise RuntimeError(f"Package {package_id} install did not complete within timeout")
         _LOGGER.warning("Package %s %s did not complete within timeout", package_id, method)
+
+    def _apply_downloaded_package(
+        self, package_id: str, task_id: str, method: str, volume_path: str
+    ) -> None:
+        """Install a downloaded SPK the way Package Center's wizard does.
+
+        Mirrors PkgManApp.js ``_onRequestInstall``: ``Installation.Download``
+        ``check`` validates the file and reports ``codesign_error`` (e.g. 4532,
+        unknown publisher); then one compound request sends ``check`` v2 and
+        the install/upgrade with the downloaded file's ``path``. Package Center
+        asks the user to agree to a codesign error and then sends
+        ``check_codesign: false``; this is only used for third-party packages,
+        which come from a package source the user added. Verified live on
+        DSM 7.4 with SynoCommunity packages.
+        """
+        checked = self._raw_entry_post(
+            "SYNO.Core.Package.Installation.Download", 1, "check", {"taskid": task_id}
+        )
+        if not checked.get("success"):
+            raise RuntimeError(
+                f"Package {package_id} download check failed: {checked.get('error')}"
+            )
+        data = checked.get("data", {})
+        codesign_error = data.get("codesign_error")
+        if codesign_error:
+            _LOGGER.info(
+                "Package %s has codesign error %s (third-party package); installing it "
+                "as Package Center does after the user agrees",
+                package_id,
+                codesign_error,
+            )
+        api = "SYNO.Core.Package.Installation"
+        try:
+            self._compound_requests(
+                [
+                    {
+                        "api": api,
+                        "method": "check",
+                        "version": 2,
+                        "id": package_id,
+                        "install_type": data.get("install_type", ""),
+                        "install_on_cold_storage": data.get("install_on_cold_storage", False),
+                        "breakpkgs": None,
+                        "blCheckDep": False,
+                        "replacepkgs": None,
+                    },
+                    {
+                        "api": api,
+                        "method": method,
+                        "version": 1,
+                        "volume_path": volume_path,
+                        "path": data.get("filename", ""),
+                        "extra_values": "{}",
+                        "type": 0,
+                        "check_codesign": not codesign_error,
+                        "force": True,
+                        "installrunpackage": True,
+                    },
+                ],
+                self._package.session,
+            )
+        except Exception as err:
+            detail = _err_detail(err)
+            _LOGGER.warning("Package %s install failed: %s", package_id, detail)
+            raise RuntimeError(f"Package {package_id} install failed: {detail}") from err
+
+    def _quick_apply(
+        self, package_id: str, method: str, volume_path: str, is_syno: bool, beta: bool
+    ) -> None:
+        """Apply a downloaded Synology package via Package Center's quick request."""
+        self._installation_request(
+            package_id,
+            "install",
+            {
+                "method": method,
+                "version": 1,
+                "name": package_id,
+                "blqinst": True,
+                "volume_path": volume_path,
+                "is_syno": is_syno,
+                "beta": beta,
+                "installrunpackage": True,
+            },
+        )
 
     def upgrade_package(self, package_id: str) -> None:
         """Upgrade a package via the DSM download-then-upgrade flow.

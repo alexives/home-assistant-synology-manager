@@ -9,11 +9,13 @@ from typing import Any
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .actions import notify, run_action
+from .const import DOMAIN
 from .coordinator import SynologyManagerCoordinator
 from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
 
@@ -181,11 +183,48 @@ class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         pkg = self._get_package()
         return pkg.latest_version if pkg else None
 
+    @property
+    def supported_features(self) -> UpdateEntityFeature:
+        pkg = self._get_package()
+        if pkg and pkg.blocked_reason:
+            return UpdateEntityFeature.RELEASE_NOTES
+        return self._attr_supported_features
+
+    @property
+    def release_summary(self) -> str | None:
+        pkg = self._get_package()
+        return pkg.blocked_reason if pkg else None
+
     async def async_release_notes(self) -> str | None:
         pkg = self._get_package()
         if pkg is None:
             return None
-        return pkg.changelog
+        notices = []
+        if pkg.unmet_dependencies:
+            notices.append(self._blocked_notice(pkg))
+        if pkg.third_party and pkg.update_available:
+            notices.append(_community_notice(pkg))
+        if not notices:
+            return pkg.changelog
+        if pkg.changelog:
+            notices.append(pkg.changelog)
+        return "\n\n---\n\n".join(notices)
+
+    def _blocked_notice(self, pkg: PackageInfo) -> str:
+        """Markdown notice for a blocked update, linking to the dependency update entities."""
+        registry = er.async_get(self.hass)
+        lines = ["**This update can't be installed yet.** Update these packages first:", ""]
+        for dep in pkg.unmet_dependencies:
+            entity_id = registry.async_get_entity_id(
+                "update", DOMAIN, f"{self.coordinator.config_entry.entry_id}_pkg_{dep.package_id}"
+            )
+            label = (
+                f"[{dep.name}](/config/updates?more-info-entity-id={entity_id})"
+                if entity_id
+                else dep.name
+            )
+            lines.append(f"- {label} {dep.requirement} (installed: {dep.installed_version})")
+        return "\n".join(lines)
 
     async def async_install(self, version: str | None, backup: bool | None, **kwargs: Any) -> None:
         await run_action(
@@ -203,6 +242,16 @@ class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
                 "Post-upgrade security scan failed for %s", self._package_id, exc_info=True
             )
         await self.coordinator.async_request_refresh()
+
+
+def _community_notice(pkg: PackageInfo) -> str:
+    """Markdown notice for a package from a third-party Package Center source."""
+    source = pkg.distributor or "a third-party package source"
+    return (
+        f"**Community package.** This package comes from {source}, not from Synology, "
+        "and Synology does not sign it. Package Center asks you to agree before it "
+        "installs an unsigned package; Install here does not ask."
+    )
 
 
 class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], UpdateEntity):

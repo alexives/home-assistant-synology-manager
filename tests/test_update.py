@@ -1,6 +1,6 @@
 """Tests for Synology Manager update entities."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.components.update import UpdateEntityFeature
@@ -10,6 +10,7 @@ from custom_components.synology_manager.synology_client import (
     DsmUpdateInfo,
     PackageInfo,
     ProjectUpdateInfo,
+    UnmetDependency,
 )
 from custom_components.synology_manager.update import (
     SynologyContainerUpdateEntity,
@@ -302,6 +303,124 @@ class TestPackageUpdateEntity:
             await entity.async_install(version=None, backup=None)
 
         mock_pn.async_create.assert_called_once()
+
+
+class TestBlockedPackageUpdateEntity:
+    """Tests for a package update that is blocked by an unmet dependency."""
+
+    @pytest.fixture
+    def blocked_coordinator(self, mock_coordinator):
+        mock_coordinator.data["packages"] = [
+            PackageInfo(
+                package_id="synokernel-cdrom",
+                display_name="SynoKernel USB CD-ROM drivers",
+                installed_version="1.3-6",
+                latest_version="2.0-8",
+                update_available=True,
+                changelog="<p>New drivers</p>",
+                is_running=None,
+                unmet_dependencies=[
+                    UnmetDependency("synocli-kernel", "SynoCli Kernel Tools", ">= 2.0", "1.3-10"),
+                ],
+            ),
+        ]
+        return mock_coordinator
+
+    def test_install_feature_removed(self, blocked_coordinator):
+        """Test that a blocked update keeps release notes but has no install feature."""
+        entity = SynologyPackageUpdateEntity(blocked_coordinator, "synokernel-cdrom")
+
+        assert UpdateEntityFeature.INSTALL not in entity.supported_features
+        assert UpdateEntityFeature.RELEASE_NOTES in entity.supported_features
+
+    def test_release_summary(self, blocked_coordinator):
+        """Test that release_summary gives the plain-text reason."""
+        entity = SynologyPackageUpdateEntity(blocked_coordinator, "synokernel-cdrom")
+
+        assert entity.release_summary == (
+            "Needs SynoCli Kernel Tools >= 2.0 (installed: 1.3-10). Update it first."
+        )
+
+    @pytest.mark.asyncio
+    async def test_release_notes_link_to_dependency(self, blocked_coordinator):
+        """Test that release notes link to the dependency's update entity."""
+        entity = SynologyPackageUpdateEntity(blocked_coordinator, "synokernel-cdrom")
+        entity.hass = MagicMock()
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = "update.test_nas_synocli_kernel_tools"
+
+        with patch("custom_components.synology_manager.update.er.async_get", return_value=registry):
+            notes = await entity.async_release_notes()
+
+        registry.async_get_entity_id.assert_called_once_with(
+            "update", "synology_manager", "test_entry_id_pkg_synocli-kernel"
+        )
+        assert (
+            "[SynoCli Kernel Tools](/config/updates?more-info-entity-id="
+            "update.test_nas_synocli_kernel_tools) >= 2.0 (installed: 1.3-10)"
+        ) in notes
+        assert notes.endswith("<p>New drivers</p>")
+
+    @pytest.mark.asyncio
+    async def test_release_notes_without_dependency_entity(self, blocked_coordinator):
+        """Test that the dependency name has no link when it has no update entity."""
+        entity = SynologyPackageUpdateEntity(blocked_coordinator, "synokernel-cdrom")
+        entity.hass = MagicMock()
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = None
+
+        with patch("custom_components.synology_manager.update.er.async_get", return_value=registry):
+            notes = await entity.async_release_notes()
+
+        assert "- SynoCli Kernel Tools >= 2.0 (installed: 1.3-10)" in notes
+        assert "](" not in notes
+
+
+class TestCommunityPackageNotice:
+    """Tests for the notice on packages from third-party Package Center sources."""
+
+    def _entity(self, mock_coordinator, update_available=True, distributor="SynoCommunity"):
+        mock_coordinator.data["packages"] = [
+            PackageInfo(
+                package_id="synokernel-usbserial",
+                display_name="SynoKernel USB Serial drivers",
+                installed_version="1.2-12",
+                latest_version="2.0-14" if update_available else "1.2-12",
+                update_available=update_available,
+                changelog="<p>New drivers</p>",
+                is_running=None,
+                third_party=True,
+                distributor=distributor,
+            ),
+        ]
+        entity = SynologyPackageUpdateEntity(mock_coordinator, "synokernel-usbserial")
+        entity.hass = MagicMock()
+        return entity
+
+    @pytest.mark.asyncio
+    async def test_notice_before_changelog(self, mock_coordinator):
+        entity = self._entity(mock_coordinator)
+
+        notes = await entity.async_release_notes()
+
+        assert notes.startswith("**Community package.** This package comes from SynoCommunity,")
+        assert "Synology does not sign it" in notes
+        assert notes.endswith("<p>New drivers</p>")
+        assert UpdateEntityFeature.INSTALL in entity.supported_features
+
+    @pytest.mark.asyncio
+    async def test_notice_without_distributor(self, mock_coordinator):
+        entity = self._entity(mock_coordinator, distributor=None)
+
+        notes = await entity.async_release_notes()
+
+        assert "comes from a third-party package source" in notes
+
+    @pytest.mark.asyncio
+    async def test_no_notice_when_up_to_date(self, mock_coordinator):
+        entity = self._entity(mock_coordinator, update_available=False)
+
+        assert await entity.async_release_notes() == "<p>New drivers</p>"
 
 
 class TestContainerUpdateEntity:

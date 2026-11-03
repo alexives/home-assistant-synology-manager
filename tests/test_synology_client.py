@@ -1,5 +1,6 @@
 """Tests for the Synology API client wrapper."""
 
+import json
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +11,9 @@ from custom_components.synology_manager.synology_client import (
     SynologyAuthenticationError,
     SynologyClient,
     SynologyConnectionError,
+    UnmetDependency,
     _err_detail,
+    _outdated_dependencies,
 )
 
 
@@ -2546,3 +2549,322 @@ class TestTriggerSecurityScan:
 
         with pytest.raises(RuntimeError, match=r"DSM error 1300: Core Error: 1300"):
             client.trigger_security_scan()
+
+
+PKG_SERVER_CORE_LIST = {
+    "SYNO.Core.Package.Server": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 2},
+}
+
+
+def _connected_client() -> SynologyClient:
+    client = SynologyClient(
+        host="nas.local",
+        port=5001,
+        username="admin",
+        password="secret",
+        secure=True,
+        verify_ssl=False,
+    )
+    client.connect()
+    return client
+
+
+class TestOutdatedDependencies:
+    """Tests for the installed-but-too-old dependency check."""
+
+    INSTALLED: ClassVar = {"synocli-kernel": ("SynoCli Kernel Tools", "1.3-10")}
+
+    def test_version_too_old(self):
+        outdated = _outdated_dependencies({"synocli-kernel": {">=": "2.0"}}, self.INSTALLED)
+        assert outdated == [
+            UnmetDependency("synocli-kernel", "SynoCli Kernel Tools", ">= 2.0", "1.3-10")
+        ]
+        assert outdated[0].description == "SynoCli Kernel Tools >= 2.0 (installed: 1.3-10)"
+
+    def test_version_met(self):
+        assert _outdated_dependencies({"synocli-kernel": {">=": "1.3-9"}}, self.INSTALLED) == []
+        assert _outdated_dependencies({"synocli-kernel": {"<": "2.0"}}, self.INSTALLED) == []
+
+    def test_build_number_compared(self):
+        assert (
+            len(_outdated_dependencies({"synocli-kernel": {">=": "1.3-11"}}, self.INSTALLED)) == 1
+        )
+
+    def test_missing_dependency_skipped(self):
+        """Missing dependencies are installed by upgrade_package(), so they don't block."""
+        assert _outdated_dependencies({"Node.js_v22": {">=": "22.0"}}, self.INSTALLED) == []
+
+    def test_unparsable_or_unknown_constraint_ignored(self):
+        assert _outdated_dependencies({"synocli-kernel": {">=": "abc!"}}, self.INSTALLED) == []
+        assert _outdated_dependencies({"synocli-kernel": {"~=": "9.0"}}, self.INSTALLED) == []
+        assert _outdated_dependencies({"synocli-kernel": None}, self.INSTALLED) == []
+
+    def test_no_dependencies(self):
+        assert _outdated_dependencies(None, self.INSTALLED) == []
+        assert _outdated_dependencies("", self.INSTALLED) == []
+
+
+@patch("custom_components.synology_manager.synology_client.SysInfo")
+@patch("custom_components.synology_manager.synology_client.Package")
+@patch("custom_components.synology_manager.synology_client.DockerApi")
+class TestThirdPartyCatalog:
+    """Tests for the merged Synology + third-party catalog."""
+
+    def _pkg(self, mock_package, official, third_party):
+        pkg = MagicMock()
+        pkg.core_list = PKG_SERVER_CORE_LIST
+        pkg.list_installable.return_value = {"data": {"packages": official}}
+        if isinstance(third_party, Exception):
+            pkg.request_data.side_effect = third_party
+        else:
+            pkg.request_data.return_value = {"data": {"packages": third_party}}
+        mock_package.return_value = pkg
+        return pkg
+
+    def test_merges_catalogs(self, mock_docker, mock_package, mock_sysinfo):
+        pkg = self._pkg(
+            mock_package,
+            [{"id": "HyperBackup", "version": "4.2", "source": "syno"}],
+            [
+                {"id": "synocli-kernel", "version": "2.1-12", "source": "others"},
+                {"id": "HyperBackup", "version": "9.9", "source": "others"},
+            ],
+        )
+        client = _connected_client()
+
+        catalog = client._installable_map()
+
+        assert catalog["HyperBackup"]["source"] == "syno"
+        assert catalog["synocli-kernel"]["version"] == "2.1-12"
+        call = pkg.request_data.call_args
+        assert call.args[0] == "SYNO.Core.Package.Server"
+        assert call.kwargs["req_param"]["method"] == "list"
+        assert call.kwargs["req_param"]["blloadothers"] is True
+
+    def test_third_party_failure_keeps_synology_catalog(
+        self, mock_docker, mock_package, mock_sysinfo
+    ):
+        self._pkg(
+            mock_package,
+            [{"id": "HyperBackup", "version": "4.2", "source": "syno"}],
+            RuntimeError("feed down"),
+        )
+        client = _connected_client()
+
+        assert list(client._installable_map()) == ["HyperBackup"]
+
+    def test_get_packages_third_party_update_and_blocker(
+        self, mock_docker, mock_package, mock_sysinfo
+    ):
+        """Third-party updates show, with source info and outdated-dependency blockers."""
+        self._pkg(
+            mock_package,
+            [],
+            [
+                {
+                    "id": "synocli-kernel",
+                    "version": "2.1-12",
+                    "source": "others",
+                    "distributor": "SynoCommunity",
+                },
+                {
+                    "id": "synokernel-cdrom",
+                    "version": "2.0-8",
+                    "source": "others",
+                    "distributor": "SynoCommunity",
+                    "deppkgs": {"synocli-kernel": {">=": "2.0"}},
+                },
+            ],
+        )
+        sysinfo = MagicMock()
+        sysinfo.installed_package_list.return_value = {
+            "data": {
+                "packages": [
+                    {"id": "synocli-kernel", "name": "SynoCli Kernel Tools", "version": "1.3-10"},
+                    {"id": "synokernel-cdrom", "name": "SynoKernel CD-ROM", "version": "1.3-6"},
+                ]
+            }
+        }
+        mock_sysinfo.return_value = sysinfo
+        client = _connected_client()
+        client._get_package_status = MagicMock(return_value={})
+
+        packages = {p.package_id: p for p in client.get_packages()}
+
+        kernel = packages["synocli-kernel"]
+        assert kernel.update_available is True
+        assert kernel.third_party is True
+        assert kernel.distributor == "SynoCommunity"
+        assert kernel.blocked_reason is None
+        cdrom = packages["synokernel-cdrom"]
+        assert cdrom.blocked_reason == (
+            "Needs SynoCli Kernel Tools >= 2.0 (installed: 1.3-10). Update it first."
+        )
+
+
+@patch("custom_components.synology_manager.synology_client.SysInfo")
+@patch("custom_components.synology_manager.synology_client.Package")
+@patch("custom_components.synology_manager.synology_client.DockerApi")
+class TestThirdPartyUpgrade:
+    """Tests for the wizard install path that third-party packages use."""
+
+    def _client(self, mock_package, mock_sysinfo, codesign_error=4532, installed="2.1-12"):
+        pkg = MagicMock()
+        pkg.list_installable.return_value = {"data": {"packages": []}}
+        pkg.get_dowload_package_status.return_value = {"data": {"finished": True}}
+        pkg.check_installation.return_value = {"data": {"volume_path": "/volume1"}}
+        mock_package.return_value = pkg
+        sysinfo = MagicMock()
+        sysinfo.installed_package_list.return_value = {
+            "data": {"packages": [{"id": "synocli-kernel", "version": installed}]}
+        }
+        mock_sysinfo.return_value = sysinfo
+        client = _connected_client()
+        client._third_party_installable = MagicMock(
+            return_value=[
+                {
+                    "id": "synocli-kernel",
+                    "version": "2.1-12",
+                    "source": "others",
+                    "beta": False,
+                    "link": "https://packages.synocommunity.com/synocli-kernel.spk",
+                    "md5": "abc123",
+                    "size": 1234,
+                }
+            ]
+        )
+        client._installation_check = MagicMock(return_value={"success": True})
+        check_data = {
+            "filename": "/volume1/@tmp/synopkg/download.x/@SYNOPKG_DOWNLOAD_synocli-kernel",
+            "install_type": "",
+            "install_on_cold_storage": False,
+        }
+        if codesign_error:
+            check_data["codesign_error"] = codesign_error
+        client._compound_requests = MagicMock(return_value=[{}, {}])
+        return client, check_data
+
+    def test_wizard_path_installs_downloaded_file(self, mock_docker, mock_package, mock_sysinfo):
+        client, check_data = self._client(mock_package, mock_sysinfo)
+
+        def post(*args, **kwargs):
+            form = kwargs["data"]
+            if form["api"] == "SYNO.Core.Package.Installation.Download":
+                return _post_response({"success": True, "data": check_data})
+            return _post_download_ok()
+
+        with patch("requests.post", side_effect=post) as mock_post:
+            client.upgrade_package("synocli-kernel")
+
+        forms = [c.kwargs["data"] for c in mock_post.call_args_list]
+        assert [(f["api"], f["method"]) for f in forms] == [
+            ("SYNO.Core.Package.Installation", "upgrade"),
+            ("SYNO.Core.Package.Installation.Download", "check"),
+        ]
+        assert forms[0]["is_syno"] == "false"
+        assert forms[1]["taskid"] == '"@SYNOPKG_DOWNLOAD"'
+
+        check, install = client._compound_requests.call_args.args[0]
+        assert (check["method"], check["version"]) == ("check", 2)
+        assert (install["method"], install["version"]) == ("upgrade", 1)
+        assert install["volume_path"] == "/volume1"
+        assert install["path"] == check_data["filename"]
+        assert install["check_codesign"] is False
+        assert install["force"] is True
+
+    def test_signed_third_party_keeps_codesign_check(self, mock_docker, mock_package, mock_sysinfo):
+        client, check_data = self._client(mock_package, mock_sysinfo, codesign_error=None)
+
+        def post(*args, **kwargs):
+            if kwargs["data"]["api"] == "SYNO.Core.Package.Installation.Download":
+                return _post_response({"success": True, "data": check_data})
+            return _post_download_ok()
+
+        with patch("requests.post", side_effect=post):
+            client.upgrade_package("synocli-kernel")
+
+        _, install = client._compound_requests.call_args.args[0]
+        assert install["check_codesign"] is True
+
+    def test_download_check_failure_raises(self, mock_docker, mock_package, mock_sysinfo):
+        client, _ = self._client(mock_package, mock_sysinfo)
+
+        def post(*args, **kwargs):
+            if kwargs["data"]["api"] == "SYNO.Core.Package.Installation.Download":
+                return _post_response({"success": False, "error": {"code": 4522}})
+            return _post_download_ok()
+
+        with (
+            patch("requests.post", side_effect=post),
+            pytest.raises(RuntimeError, match="download check failed"),
+        ):
+            client.upgrade_package("synocli-kernel")
+        client._compound_requests.assert_not_called()
+
+    def test_install_failure_raises_with_package(self, mock_docker, mock_package, mock_sysinfo):
+        client, check_data = self._client(mock_package, mock_sysinfo)
+        client._compound_requests.side_effect = RuntimeError("upgrade failed: 4540")
+
+        def post(*args, **kwargs):
+            if kwargs["data"]["api"] == "SYNO.Core.Package.Installation.Download":
+                return _post_response({"success": True, "data": check_data})
+            return _post_download_ok()
+
+        with (
+            patch("requests.post", side_effect=post),
+            pytest.raises(RuntimeError, match="synocli-kernel install failed"),
+        ):
+            client.upgrade_package("synocli-kernel")
+
+
+@patch("custom_components.synology_manager.synology_client.SysInfo")
+@patch("custom_components.synology_manager.synology_client.Package")
+@patch("custom_components.synology_manager.synology_client.DockerApi")
+class TestCompoundRequests:
+    """Tests for the multi-request SYNO.Entry.Request helper."""
+
+    REQUESTS: ClassVar = [
+        {"api": "A", "method": "a", "version": 1},
+        {"api": "B", "method": "b", "version": 1},
+    ]
+
+    def _session(self):
+        session = MagicMock()
+        session._sid = "sid"
+        session._syno_token = "token"
+        return session
+
+    def _resp(self, results):
+        return _post_response({"data": {"has_fail": False, "result": results}, "success": True})
+
+    def test_returns_data_in_order(self, mock_docker, mock_package, mock_sysinfo):
+        client = _connected_client()
+        resp = self._resp(
+            [{"success": True, "data": {"x": 1}}, {"success": True, "data": {"y": 2}}]
+        )
+        with patch("requests.post", return_value=resp) as post:
+            assert client._compound_requests(self.REQUESTS, self._session()) == [
+                {"x": 1},
+                {"y": 2},
+            ]
+        form = post.call_args.kwargs["data"]
+        assert form["mode"] == "sequential"
+        assert form["stop_when_error"] == "true"
+        assert json.loads(form["compound"]) == self.REQUESTS
+        assert post.call_args.kwargs["headers"]["X-SYNO-TOKEN"] == "token"
+        assert post.call_args.kwargs["timeout"] is not None
+
+    def test_raises_on_failed_request(self, mock_docker, mock_package, mock_sysinfo):
+        client = _connected_client()
+        resp = self._resp([{"success": True, "data": {}}, {"success": False, "error": {"code": 1}}])
+        with (
+            patch("requests.post", return_value=resp),
+            pytest.raises(RuntimeError, match="B b failed"),
+        ):
+            client._compound_requests(self.REQUESTS, self._session())
+
+    def test_raises_on_missing_results(self, mock_docker, mock_package, mock_sysinfo):
+        client = _connected_client()
+        resp = self._resp([{"success": True, "data": {}}])
+        with patch("requests.post", return_value=resp), pytest.raises(RuntimeError, match="1 of 2"):
+            client._compound_requests(self.REQUESTS, self._session())
