@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.components.update import UpdateEntityFeature
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.synology_manager.synology_client import (
     ContainerInfo,
@@ -13,6 +14,7 @@ from custom_components.synology_manager.synology_client import (
     UnmetDependency,
 )
 from custom_components.synology_manager.update import (
+    UNMANAGED_PROJECT_NOTICE,
     SynologyContainerUpdateEntity,
     SynologyDSMUpdateEntity,
     SynologyPackageUpdateEntity,
@@ -572,16 +574,34 @@ class TestProjectUpdateEntity:
             ["lukevella/rallly:3.12.1", "postgres:14.2"],
         )
 
+    def test_managed_project_supports_install(self, project_coordinator):
+        entity = SynologyProjectUpdateEntity(project_coordinator, "rallly")
+        assert entity.supported_features & UpdateEntityFeature.INSTALL
+        assert entity.release_summary is None
+
     @pytest.mark.asyncio
-    async def test_install_noop_when_no_project_id(self, project_coordinator):
+    async def test_unmanaged_project_cannot_install(self, project_coordinator):
+        """A compose label with no Container Manager project (e.g. a Portainer stack)."""
         project_coordinator.data["project_updates"][0].project_id = None
         entity = SynologyProjectUpdateEntity(project_coordinator, "rallly")
         entity.hass = MagicMock()
         entity.hass.async_add_executor_job = AsyncMock()
 
-        await entity.async_install(version=None, backup=None)
+        assert entity.supported_features == UpdateEntityFeature.RELEASE_NOTES
+        assert entity.release_summary == UNMANAGED_PROJECT_NOTICE
+        notes = await entity.async_release_notes()
+        assert UNMANAGED_PROJECT_NOTICE in notes
+        assert "lukevella/rallly" in notes
 
+        with pytest.raises(HomeAssistantError, match="does not manage this project"):
+            await entity.async_install(version=None, backup=None)
         entity.hass.async_add_executor_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_install_raises_when_project_gone(self, project_coordinator):
+        entity = SynologyProjectUpdateEntity(project_coordinator, "nonexistent")
+        with pytest.raises(HomeAssistantError, match="no longer on the NAS"):
+            await entity.async_install(version=None, backup=None)
 
     def test_missing_project_returns_none(self, project_coordinator):
         entity = SynologyProjectUpdateEntity(project_coordinator, "nonexistent")
