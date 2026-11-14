@@ -202,14 +202,23 @@ class TaskInfo:
 
     @property
     def last_result(self) -> str | None:
-        """``running``, ``success``, ``failed``, or DSM's own exit type; None before any run."""
-        if self.last_exit_type is None:
-            return None
+        """``running``, ``success``, or ``failed``; None before any run.
+
+        Judged by the exit code, not DSM's ``exit_type``: DSM reports
+        ``by_signal`` ("Interrupted" in its UI) for runs that simply exited
+        non-zero (verified live: ``xargs``'s 123), so only ``running`` is
+        taken from the exit type.
+        """
         if self.last_exit_type == "running":
             return "running"
-        if self.last_exit_type == "normal":
-            return "success" if self.last_exit_code == 0 else "failed"
-        return self.last_exit_type
+        if self.last_exit_code is None:
+            return None
+        return "success" if self.last_exit_code == 0 else "failed"
+
+    @property
+    def finished_exit_code(self) -> int | None:
+        """Exit code of the latest finished run; None while running (DSM reports 0 then)."""
+        return None if self.last_exit_type == "running" else self.last_exit_code
 
 
 def _parse_task_time(value: str | None, tz: tzinfo) -> datetime | None:

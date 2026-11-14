@@ -317,7 +317,13 @@ async def test_task_devices_and_entities(hass: HomeAssistant, entry: MockConfigE
     assert dt_util.parse_datetime(next_run.state) == NEXT_RUN
     result = hass.states.get(_task_entity(hass, entry, "sensor", "7_last_result"))
     assert result.state == "success"
-    assert result.attributes["exit_code"] == 0
+    assert result.attributes["device_class"] == "enum"
+    assert result.attributes["options"] == ["running", "success", "failed"]
+    assert result.attributes["exit_type"] == "normal"
+    assert "exit_code" not in result.attributes
+    exit_code_id = _task_entity(hass, entry, "sensor", "7_last_exit_code")
+    assert hass.states.get(exit_code_id).state == "0"
+    assert er.async_get(hass).async_get(exit_code_id).entity_category == "diagnostic"
 
     # Triggered task: device and sensors, but no Run button.
     assert _task_device(hass, entry, 1000) is not None
@@ -345,10 +351,13 @@ async def test_run_button_runs_task_and_follows_the_run(
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=6))
     await hass.async_block_till_done()
     assert hass.states.get(result_id).state == "running"
+    exit_code_id = _task_entity(hass, entry, "sensor", "7_last_exit_code")
+    assert hass.states.get(exit_code_id).state == "unknown"
 
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=40))
     await hass.async_block_till_done()
     assert hass.states.get(result_id).state == "failed"
+    assert hass.states.get(exit_code_id).state == "1"
 
     # Finished: no further checks.
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=80))

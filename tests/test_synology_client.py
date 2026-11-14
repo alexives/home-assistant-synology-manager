@@ -2937,7 +2937,10 @@ class TestTaskInfo:
             ("running", 0, "running"),
             ("normal", 0, "success"),
             ("normal", 1, "failed"),
-            ("killed", 137, "killed"),
+            # Live: DSM files a plain non-zero exit (xargs's 123) as by_signal.
+            ("by_signal", 123, "failed"),
+            ("by_signal", 0, "success"),
+            ("unknown_type", 2, "failed"),
         ],
     )
     def test_last_result(self, exit_type, exit_code, expected):
@@ -2953,6 +2956,7 @@ class TestTaskInfo:
             last_exit_code=exit_code,
         )
         assert task.last_result == expected
+        assert task.finished_exit_code == (None if exit_type == "running" else exit_code)
 
     @pytest.mark.parametrize(
         ("task_type", "real_owner", "can_run", "expected"),

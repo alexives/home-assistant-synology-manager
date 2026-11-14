@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -25,7 +26,7 @@ from .synology_client import TaskInfo
 class TaskSensorDescription(SensorEntityDescription):
     """Describes one per-task sensor."""
 
-    value_fn: Callable[[TaskInfo], datetime | str | None]
+    value_fn: Callable[[TaskInfo], datetime | int | str | None]
     attrs_fn: Callable[[TaskInfo], dict[str, Any]] | None = None
 
 
@@ -46,11 +47,17 @@ TASK_SENSORS: tuple[TaskSensorDescription, ...] = (
     TaskSensorDescription(
         key="last_result",
         name="Last result",
+        device_class=SensorDeviceClass.ENUM,
+        options=["running", "success", "failed"],
         value_fn=lambda task: task.last_result,
-        attrs_fn=lambda task: {
-            "exit_code": task.last_exit_code,
-            "exit_type": task.last_exit_type,
-        },
+        # DSM's own label for the run ("by_signal" shows as "Interrupted").
+        attrs_fn=lambda task: {"exit_type": task.last_exit_type},
+    ),
+    TaskSensorDescription(
+        key="last_exit_code",
+        name="Last exit code",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda task: task.finished_exit_code,
     ),
 )
 
@@ -109,7 +116,7 @@ class SynologyTaskSensorEntity(SynologyManagerEntity, SensorEntity):
         return super().available and self.coordinator.get_task(self._task_id) is not None
 
     @property
-    def native_value(self) -> datetime | str | None:
+    def native_value(self) -> datetime | int | str | None:
         task = self.coordinator.get_task(self._task_id)
         return self.entity_description.value_fn(task) if task else None
 
