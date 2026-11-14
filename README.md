@@ -14,6 +14,7 @@ A Home Assistant custom integration for managing packages on Synology NAS device
 - **Container Updates** - detect and apply Docker container image updates via Container Manager, with support for compose projects grouped as single entities
 - **Compose Project Switches** - start and stop Docker compose projects from Home Assistant
 - **Security Advisor Scan** - a button to trigger a Security Advisor scan on demand (also run automatically after a package upgrade)
+- **Devices** - all entities sit on one NAS device (model, serial, DSM version, link to DSM); each compose project is a sub-device holding its switch and update entity
 
 ## Installation
 
@@ -70,6 +71,7 @@ Schedule the pull task before the cleanup task.
 
 ## Requirements
 
+- Home Assistant 2026.9+ (for sub-devices)
 - DSM 7.0+
 - Admin account on the NAS
 - Container Manager installed (for container update and switch entities)

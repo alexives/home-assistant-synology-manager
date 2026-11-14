@@ -8,10 +8,10 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .actions import run_action
 from .coordinator import SynologyManagerCoordinator
+from .entity import SynologyManagerEntity, project_device_info
 from .synology_client import PackageInfo, ProjectInfo
 
 
@@ -53,7 +53,7 @@ async def async_setup_entry(
     coordinator.async_add_listener(_async_add_new_entities)
 
 
-class SynologyPackageSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator], SwitchEntity):
+class SynologyPackageSwitchEntity(SynologyManagerEntity, SwitchEntity):
     """Switch entity for a Synology package."""
 
     _optimistic_state: bool | None = None
@@ -115,7 +115,7 @@ class SynologyPackageSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator],
         await self.coordinator.async_request_refresh()
 
 
-class SynologyProjectSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator], SwitchEntity):
+class SynologyProjectSwitchEntity(SynologyManagerEntity, SwitchEntity):
     """Switch entity for a Docker compose project."""
 
     _optimistic_state: bool | None = None
@@ -124,6 +124,9 @@ class SynologyProjectSwitchEntity(CoordinatorEntity[SynologyManagerCoordinator],
         super().__init__(coordinator)
         self._project_id = project_id
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_proj_{project_id}"
+        proj = self._get_project()
+        if proj is not None:
+            self._attr_device_info = project_device_info(coordinator, proj.name)
 
     def _get_project(self) -> ProjectInfo | None:
         for proj in self.coordinator.data.get("projects", []):

@@ -2,17 +2,18 @@
 
 ## What this is
 
-A Home Assistant custom integration for managing packages on Synology NAS devices - update entities for DSM firmware, installed packages, and Docker containers, plus switch entities for Docker compose project control.
+A Home Assistant custom integration for managing packages on Synology NAS devices - update entities for DSM firmware, installed packages, and Docker containers, plus switch entities for package and Docker compose project control.
 
 ## Architecture
 
 - `synology_client.py` - Wrapper around the `synology-api` (N4S4) library. Uses the library's `SysInfo`, `Package`, and `Docker` classes for read operations. Makes raw API calls via `request_data()` for write operations not covered by the library (trigger DSM upgrade, pull Docker image, recreate container, trigger security scan, start/stop compose projects). All methods are synchronous (`requests`-based).
 - `coordinator.py` - `DataUpdateCoordinator` that polls all four data sources (DSM, packages, containers, projects) every 6 hours. Calls `synology_client` methods via `hass.async_add_executor_job` since the API is sync. Per-source error isolation: if one source fails, others still update.
-- `update.py` - Three `UpdateEntity` subclasses: `SynologyDSMUpdateEntity`, `SynologyPackageUpdateEntity`, `SynologyContainerUpdateEntity`. All support `INSTALL`. Package install auto-triggers a Security Advisor scan.
-- `switch.py` - `SynologyProjectSwitchEntity` for Docker compose projects. On/off maps to start/stop.
+- `update.py` - Four `UpdateEntity` subclasses: `SynologyDSMUpdateEntity`, `SynologyPackageUpdateEntity`, `SynologyProjectUpdateEntity` (one per compose project, all its containers combined), `SynologyContainerUpdateEntity` (standalone containers only). All support `INSTALL`. Package install auto-triggers a Security Advisor scan.
+- `switch.py` - `SynologyPackageSwitchEntity` (packages DSM can start/stop) and `SynologyProjectSwitchEntity` (Docker compose projects). On/off maps to start/stop.
+- `entity.py` - `SynologyManagerEntity` base class (attaches to the NAS device) plus device registry helpers: NAS device registration, compose-project child devices, stale child-device cleanup.
 - `button.py` - `SynologySecurityScanButtonEntity`, a button that triggers a Security Advisor scan on demand (same path package upgrades use).
 - `config_flow.py` - UI config flow collecting host, port, credentials, SSL settings. Validates by attempting a login. Includes reauth support.
-- `__init__.py` - Entry setup: creates client, connects, creates coordinator, forwards to button, switch, and update platforms.
+- `__init__.py` - Entry setup: creates client, connects, creates coordinator, registers the NAS device, removes stale child devices, forwards to button, switch, and update platforms. `async_remove_config_entry_device` lets the UI delete a child device whose item is gone.
 
 ## Key details
 
@@ -25,6 +26,7 @@ A Home Assistant custom integration for managing packages on Synology NAS device
 - DSM upgrade / reboot window, all observed live during the 7.3.2 → 7.4.1 upgrade: once `SYNO.Core.Upgrade` `start` is accepted, DSM tears down its web stack - for ~4 min every API call *including login* returns error **499** ("system not ready" in DSM's login JS; **498** = "system upgrading"), then the NAS drops off the network entirely for the reboot (~5 min), then services come back but **Container Manager sits in `starting` for ~2 more min** answering with misleading error codes, and some packages can linger in status `upgrading`. The library has no table entry for 498/499 and dies with `KeyError` while formatting its own exception. Client behavior: `_err_detail()` translates 498/499 into "the NAS is not ready"; `upgrade_dsm()` treats a dropped connection (confirmed by a 30s login probe - a healthy NAS still reporting the update as pending means the start never landed) or 498/499 on the final `start` as success; the DSM entity skips the immediate coordinator refresh (a failed refresh would mark all entities unavailable for the full 6h interval) and schedules one 25 min out; Docker writes gate on the Container Manager package reporting `running`. Synology's guidance: the whole update can take up to 20 minutes - the DSM entity posts a persistent notification saying so.
 - Error surfacing: every entity write action goes through `actions.run_action`, which logs the full traceback at ERROR, creates a persistent notification with a clickable link to `/config/logs?filter=synology_manager` (the frontend pre-fills the search box from the `filter` param), and raises `HomeAssistantError` so the popup carries the real cause. Client-side best-effort failures log at WARNING with `_err_detail()` (never a bare `str(err)` - library exceptions can stringify to `""`).
 - Update entities override `version_is_newer` to compare the build suffix (`X.Y.Z-BUILD`); HA's default (AwesomeVersion) ignores it, so build-only bumps like `1.5.2-1831` → `1.5.2-1832` would otherwise show as "Up-to-date".
+- Devices: one NAS device per config entry (identifier = entry id; model/serial from `SYNO.DSM.Info` `getinfo`, `sw_version` kept in step with the DSM source by a coordinator listener). Each compose project is a **child device** (HA 2026.9+ `ChildDeviceInfo` with `parent_device_id`, not the older `via_device`) keyed `<entry_id>_project_<project name>`, holding the project switch and project update entity; everything else sits on the NAS device. Child devices reference the NAS device by device id, so `__init__` registers it before forwarding platforms. Stale child devices are removed at setup, before entities load (so no live entity needs re-adding if the item comes back), and only when every source behind that kind succeeded: the coordinator records `failed_sources`, `get_projects()` raises instead of returning `[]` on failure, and no Container Manager (`client.has_docker` false, e.g. still starting after a reboot) counts the Docker sources as failed. An empty list must never read as "everything was deleted". Look devices up with `async_get_device_by_identifier` / `async_get_child_device_by_identifier`; HA 2026.10 raises on the old `async_get_device`.
 - Container update detection: compares `downloaded_images().id` (local image on disk) with container `ImageID` (image the container was created from). No remote registry polling.
 - Unmanaged compose projects: containers can carry a `com.docker.compose.project` label that Container Manager has no project for (seen live: leftover Portainer stacks, `working_dir` `/data/compose/<n>`). `group_container_updates()` still groups them, with `project_id` None, and `SYNO.Docker.Project` can't rebuild them, so the project update entity drops `INSTALL`, explains why in `release_summary` and the release notes, and raises `HomeAssistantError` if an install still arrives (it used to return silently, so the Update button did nothing).
 - Container update for compose projects = stop + build + start via `SYNO.Docker.Project`. For ghcr.io/lscr.io images, pull is skipped (user manages pulls via Synology Task Scheduler). For Docker Hub images, `pull_start` is attempted first, then Docker session is reconnected before rebuild.
@@ -35,23 +37,21 @@ A Home Assistant custom integration for managing packages on Synology NAS device
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Unit tests
-python3 -m pytest tests/ -v
+# Unit tests (tests/integration needs synology_api and a live NAS; skip it locally)
+mise exec -- python -m pytest tests/ -v --ignore=tests/integration
 
 # Lint
-uvx ruff check custom_components/ tests/
-uvx ruff format --check custom_components/ tests/
+mise exec -- ruff check custom_components/ tests/
+mise exec -- ruff format --check custom_components/ tests/
 ```
 
 ## Local dev environment
 
-The `ha-dev` container is managed from the **sibling duo repo's** compose, not this repo's - it mounts several repos' `custom_components/` into one HA instance, so using this repo's compose would create a separate volume and lose the existing config. **Both compose files are required**: the gitignored `docker-compose.dev.local.yml` holds the mount for this repo's `custom_components/synology_manager`. Recreating with the base file alone leaves that directory empty and the integration fails to load:
+The `ha-dev` container comes from this repo's `docker-compose.dev.yml` (its compose labels point here; the sibling duo repo that used to manage it is no longer checked out). It mounts this repo's `custom_components/` into the `ha-config` volume, so edits appear immediately:
 
 ```bash
-cd ../home_assistant_gitlab_duo
-docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d
+docker start ha-dev     # existing container; don't recreate it, the config lives in the volume
 # HA at http://localhost:8123
-# custom_components/synology_manager is live-mounted, so edits appear immediately.
 docker restart ha-dev   # reload after code changes
 ```
 

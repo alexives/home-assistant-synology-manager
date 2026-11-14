@@ -58,6 +58,8 @@ async def test_setup_entry(hass: HomeAssistant) -> None:
     mock_client.get_containers.return_value = []
     mock_client.get_projects.return_value = []
     mock_client.group_container_updates = SynologyClient.group_container_updates
+    mock_client.configuration_url = "https://192.168.1.100:5001"
+    mock_client.has_docker = True
 
     with (
         patch(
@@ -128,6 +130,8 @@ async def test_unload_entry(hass: HomeAssistant) -> None:
     mock_client.get_containers.return_value = []
     mock_client.get_projects.return_value = []
     mock_client.group_container_updates = SynologyClient.group_container_updates
+    mock_client.configuration_url = "https://192.168.1.100:5001"
+    mock_client.has_docker = True
 
     with (
         patch(

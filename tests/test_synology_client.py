@@ -216,6 +216,8 @@ class TestDsmUpdate:
         assert result.installed_version == "DSM 7.3.2-86009 Update 3"
         assert result.latest_version == "DSM 7.3.2-86009 Update 4"
         assert result.update_available is True
+        assert result.model == "DS920+"
+        assert result.serial is None
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -1349,23 +1351,20 @@ class TestProjects:
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
     @patch("custom_components.synology_manager.synology_client.DockerApi")
-    def test_list_projects_failure_logs_warning(
-        self, mock_docker, mock_package, mock_sysinfo, caplog
-    ):
-        """A failed project listing must be visible at default log level."""
-        import logging
+    def test_list_projects_failure_raises(self, mock_docker, mock_package, mock_sysinfo):
+        """A failed project listing raises, so the coordinator records the source as failed.
 
+        Returning [] would read as "every project was deleted" and remove the
+        project devices.
+        """
         mock_docker_inst = MagicMock()
         mock_docker_inst.list_projects.side_effect = Exception("Core Error: 119")
         mock_docker.return_value = mock_docker_inst
 
         client = SynologyClient(host="nas.local", port=5001, username="admin", password="secret")
         client.connect()
-        with caplog.at_level(logging.WARNING):
-            assert client.get_projects() == []
-
-        record = next(r for r in caplog.records if "Core Error: 119" in r.message)
-        assert record.levelno == logging.WARNING
+        with pytest.raises(Exception, match="Core Error: 119"):
+            client.get_projects()
 
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
@@ -1388,22 +1387,15 @@ class TestProjects:
     @patch("custom_components.synology_manager.synology_client.SysInfo")
     @patch("custom_components.synology_manager.synology_client.Package")
     @patch("custom_components.synology_manager.synology_client.DockerApi")
-    def test_get_projects_api_failure(self, mock_docker, mock_package, mock_sysinfo):
-        """Test that list_projects failure returns empty list."""
-        mock_docker_inst = MagicMock()
-        mock_docker_inst.list_projects.side_effect = Exception("API error 1202")
-        mock_docker.return_value = mock_docker_inst
-
+    def test_has_docker_and_configuration_url(self, mock_docker, mock_package, mock_sysinfo):
+        """has_docker follows the Docker login; configuration_url follows the SSL setting."""
         client = SynologyClient(
-            host="nas.local",
-            port=5001,
-            username="admin",
-            password="secret",
-            secure=True,
-            verify_ssl=False,
+            host="nas.local", port=5000, username="admin", password="secret", secure=False
         )
+        assert client.has_docker is False
         client.connect()
-        assert client.get_projects() == []
+        assert client.has_docker is True
+        assert client.configuration_url == "http://nas.local:5000"
 
 
 class TestDockerWriteOperations:
