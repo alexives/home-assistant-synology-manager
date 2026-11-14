@@ -1,8 +1,9 @@
 """Device registry helpers and the base entity for Synology Manager.
 
-Every entity hangs off one NAS device. Compose projects get a child device
-(HA 2026.9+ ``ChildDeviceInfo``) under it, holding the project's switch and
-update entities.
+Every entity hangs off one NAS device. Compose projects and Task Scheduler
+tasks get a child device (HA 2026.9+ ``ChildDeviceInfo``) under it: a
+project's holds its switch and update entities, a task's its Run button and
+run sensors.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     from .coordinator import SynologyManagerCoordinator
+    from .synology_client import TaskInfo
 
 PROJECT_KEY = "project"
+TASK_KEY = "task"
 
 # Child device kinds: identifier key segment -> (coordinator sources that must
 # have succeeded before a missing item counts as gone, live-name extractor).
@@ -33,6 +36,10 @@ _CHILD_KINDS: dict[str, tuple[frozenset[str], Any]] = {
             {p.name for p in data.get("projects", [])}
             | {pu.project_name for pu in data.get("project_updates", [])}
         ),
+    ),
+    TASK_KEY: (
+        frozenset({"tasks"}),
+        lambda data: {str(t.task_id) for t in data.get("tasks", [])},
     ),
 }
 
@@ -55,6 +62,16 @@ def project_device_info(
     return ChildDeviceInfo(
         identifiers={(DOMAIN, child_identifier(entry_id, PROJECT_KEY, project_name))},
         name=_prettify(project_name),
+        parent_device_id=coordinator.nas_device_id,
+    )
+
+
+def task_device_info(coordinator: SynologyManagerCoordinator, task: TaskInfo) -> ChildDeviceInfo:
+    """Child device info for a Task Scheduler task (keyed by DSM's task id)."""
+    entry_id = coordinator.config_entry.entry_id
+    return ChildDeviceInfo(
+        identifiers={(DOMAIN, child_identifier(entry_id, TASK_KEY, str(task.task_id)))},
+        name=task.name,
         parent_device_id=coordinator.nas_device_id,
     )
 

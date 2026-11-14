@@ -1,6 +1,7 @@
 """Tests for the Synology API client wrapper."""
 
 import json
+from datetime import UTC, datetime, timedelta, timezone
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -11,10 +12,18 @@ from custom_components.synology_manager.synology_client import (
     SynologyAuthenticationError,
     SynologyClient,
     SynologyConnectionError,
+    TaskInfo,
     UnmetDependency,
     _err_detail,
     _outdated_dependencies,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_task_scheduler():
+    """Stand in for the library's TaskScheduler (connect() builds one on every login)."""
+    with patch("custom_components.synology_manager.synology_client.TaskScheduler") as mock:
+        yield mock
 
 
 class TestErrDetail:
@@ -2860,3 +2869,199 @@ class TestCompoundRequests:
         resp = self._resp([{"success": True, "data": {}}])
         with patch("requests.post", return_value=resp), pytest.raises(RuntimeError, match="1 of 2"):
             client._compound_requests(self.REQUESTS, self._session())
+
+
+# Shapes captured live from DSM 7.4.1 (SYNO.Core.TaskScheduler list v3 and
+# get_history_status_list v1). The NAS runs at UTC-6: start_time is local,
+# timestamp is epoch seconds.
+LIVE_TASKS = [
+    {
+        "id": 7,
+        "name": "Download Kobo Books",
+        "type": "script",
+        "owner": "alex",
+        "real_owner": "root",
+        "enable": True,
+        "can_run": True,
+        "next_trigger_time": "2026-11-15 00:50",
+    },
+    {
+        "id": 6,
+        "name": "Refresh Docker Images",
+        "type": "script",
+        "owner": "root",
+        "real_owner": "root",
+        "enable": False,
+        "can_run": True,
+        "next_trigger_time": "2026-12-06 00:00",
+    },
+    {
+        "id": 1000,
+        "name": "Fix ports",
+        "type": "event_script",
+        "owner": "root",
+        "real_owner": None,
+        "enable": True,
+        "can_run": True,
+        "next_trigger_time": "bootup",
+    },
+]
+LIVE_HISTORY_RUNNING = {
+    "data": [
+        {
+            "exit_code": 0,
+            "exit_type": "running",
+            "start_time": "2026-11-14 13:46:09",
+            "stop_time": "",
+            "timestamp": "1794685569",
+        },
+        {
+            "exit_code": 0,
+            "exit_type": "normal",
+            "start_time": "2026-11-14 00:50:01",
+            "stop_time": "2026-11-14 00:50:50",
+            "timestamp": "1794639001",
+        },
+    ],
+    "success": True,
+}
+
+
+class TestTaskInfo:
+    """Tests for the derived task fields."""
+
+    @pytest.mark.parametrize(
+        ("exit_type", "exit_code", "expected"),
+        [
+            (None, None, None),
+            ("running", 0, "running"),
+            ("normal", 0, "success"),
+            ("normal", 1, "failed"),
+            # Live: DSM files a plain non-zero exit (xargs's 123) as by_signal.
+            ("by_signal", 123, "failed"),
+            ("by_signal", 0, "success"),
+            ("unknown_type", 2, "failed"),
+        ],
+    )
+    def test_last_result(self, exit_type, exit_code, expected):
+        task = TaskInfo(
+            task_id=1,
+            name="t",
+            task_type="script",
+            real_owner="root",
+            enabled=True,
+            can_run=True,
+            next_run=None,
+            last_exit_type=exit_type,
+            last_exit_code=exit_code,
+        )
+        assert task.last_result == expected
+        assert task.finished_exit_code == (None if exit_type == "running" else exit_code)
+
+    @pytest.mark.parametrize(
+        ("task_type", "real_owner", "can_run", "expected"),
+        [
+            ("script", "root", True, True),
+            ("script", "root", False, False),
+            ("script", None, True, False),
+            ("event_script", "root", True, False),
+        ],
+    )
+    def test_runnable(self, task_type, real_owner, can_run, expected):
+        task = TaskInfo(
+            task_id=1,
+            name="t",
+            task_type=task_type,
+            real_owner=real_owner,
+            enabled=True,
+            can_run=can_run,
+            next_run=None,
+        )
+        assert task.runnable is expected
+
+
+@patch("custom_components.synology_manager.synology_client.SysInfo")
+@patch("custom_components.synology_manager.synology_client.Package")
+@patch("custom_components.synology_manager.synology_client.DockerApi")
+class TestTasks:
+    """Tests for Task Scheduler listing and running."""
+
+    @staticmethod
+    def _client(mock_task_scheduler, history):
+        api = mock_task_scheduler.return_value
+        api.get_task_list.return_value = {
+            "data": {"tasks": LIVE_TASKS, "total": len(LIVE_TASKS)},
+            "success": True,
+        }
+        api.get_task_results.side_effect = history
+        client = SynologyClient(host="nas.local", port=5001, username="admin", password="secret")
+        client.connect()
+        return client, api
+
+    def test_get_tasks_live_shapes(self, _docker, _package, _sysinfo, mock_task_scheduler):
+        def history(task_id):
+            if task_id == 7:
+                return LIVE_HISTORY_RUNNING
+            return {"data": [], "success": True}
+
+        client, _ = self._client(mock_task_scheduler, history)
+        tasks = {t.task_id: t for t in client.get_tasks(fallback_tz=UTC)}
+
+        kobo = tasks[7]
+        assert kobo.name == "Download Kobo Books"
+        assert kobo.runnable is True
+        assert kobo.last_run == datetime(2026, 11, 14, 19, 46, 9, tzinfo=UTC)
+        assert kobo.last_result == "running"
+        # Offset comes from the run history (UTC-6), not the fallback zone.
+        assert kobo.next_run == datetime(2026, 11, 15, 6, 50, tzinfo=UTC)
+
+        assert tasks[6].next_run is None  # disabled
+        assert tasks[6].last_run is None
+        assert tasks[1000].runnable is False
+        assert tasks[1000].next_run is None  # "bootup"
+
+    def test_get_tasks_without_history_uses_fallback_zone(
+        self, _docker, _package, _sysinfo, mock_task_scheduler
+    ):
+        client, _ = self._client(mock_task_scheduler, Exception("history 4800"))
+        fallback = timezone(timedelta(hours=1))
+        tasks = {t.task_id: t for t in client.get_tasks(fallback_tz=fallback)}
+
+        assert tasks[7].last_run is None
+        assert tasks[7].next_run == datetime(2026, 11, 15, 0, 50, tzinfo=fallback)
+
+    def test_get_tasks_pages_through_the_list(
+        self, _docker, _package, _sysinfo, mock_task_scheduler
+    ):
+        client, api = self._client(mock_task_scheduler, lambda _id: {"data": []})
+        pages = {0: LIVE_TASKS[:2], 2: LIVE_TASKS[2:]}
+        api.get_task_list.side_effect = lambda **kw: {
+            "data": {"tasks": pages[kw["offset"]], "total": 3}
+        }
+
+        assert [t.task_id for t in client.get_tasks()] == [7, 6, 1000]
+        assert api.get_task_list.call_count == 2
+
+    def test_run_task(self, _docker, _package, _sysinfo, mock_task_scheduler):
+        client, api = self._client(mock_task_scheduler, lambda _id: {"data": []})
+        client.run_task(7, "root")
+        api.task_run.assert_called_once_with(7, "root")
+
+    def test_run_task_retries_on_fresh_session(
+        self, _docker, _package, _sysinfo, mock_task_scheduler
+    ):
+        client, api = self._client(mock_task_scheduler, lambda _id: {"data": []})
+        api.task_run.side_effect = [Exception("Core Error: 119"), {"success": True}]
+        with patch.object(client, "reconnect") as reconnect:
+            client.run_task(7, "root")
+        reconnect.assert_called_once()
+        assert api.task_run.call_count == 2
+
+    def test_run_task_raises_after_retry(self, _docker, _package, _sysinfo, mock_task_scheduler):
+        client, api = self._client(mock_task_scheduler, lambda _id: {"data": []})
+        api.task_run.side_effect = Exception("Core Error: 119")
+        with (
+            patch.object(client, "reconnect"),
+            pytest.raises(RuntimeError, match="Task 7 run failed"),
+        ):
+            client.run_task(7, "root")

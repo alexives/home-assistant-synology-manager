@@ -32,7 +32,7 @@ from .entity import (
 )
 from .synology_client import SynologyAuthenticationError, SynologyClient, SynologyConnectionError
 
-PLATFORMS = (Platform.BUTTON, Platform.SWITCH, Platform.UPDATE)
+PLATFORMS = (Platform.BUTTON, Platform.SENSOR, Platform.SWITCH, Platform.UPDATE)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
@@ -75,7 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SynologyManagerConfigEnt
     entry.runtime_data = SynologyManagerData(client=client, coordinator=coordinator)
 
     # The NAS device must exist before platforms add entities: child devices
-    # (compose projects) reference it by device id.
+    # (compose projects, tasks) reference it by device id.
     coordinator.nas_device_id = register_nas_device(hass, entry, coordinator)
     # Cleanup runs before any entity loads, so removed devices take their
     # registry entries with them and nothing live needs re-adding.
@@ -83,6 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SynologyManagerConfigEnt
     entry.async_on_unload(
         coordinator.async_add_listener(lambda: update_nas_sw_version(hass, coordinator))
     )
+    entry.async_on_unload(coordinator.async_cancel_task_watch)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

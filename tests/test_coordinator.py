@@ -57,6 +57,7 @@ def mock_client():
             status="running",
         ),
     ]
+    client.get_tasks.return_value = []
     client.group_container_updates = SynologyClient.group_container_updates
     return client
 
@@ -126,6 +127,7 @@ async def test_coordinator_all_fail_raises(hass: HomeAssistant, mock_client) -> 
     mock_client.get_packages.side_effect = Exception("Packages down")
     mock_client.get_containers.side_effect = Exception("Docker down")
     mock_client.get_projects.side_effect = Exception("Projects down")
+    mock_client.get_tasks.side_effect = Exception("Tasks down")
 
     coordinator = SynologyManagerCoordinator(hass, mock_client, "Test Nas")
     await coordinator.async_refresh()
