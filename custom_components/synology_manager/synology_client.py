@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 from packaging.version import InvalidVersion, Version
@@ -15,10 +16,15 @@ try:
     from synology_api.core_package import Package
     from synology_api.core_sys_info import SysInfo
     from synology_api.docker_api import Docker as DockerApi
+    from synology_api.task_scheduler import TaskScheduler
 except ImportError:
     SysInfo = None  # type: ignore[assignment,misc]
     Package = None  # type: ignore[assignment,misc]
     DockerApi = None  # type: ignore[assignment,misc]
+    TaskScheduler = None  # type: ignore[assignment,misc]
+
+# Task Scheduler times ("2026-11-15 00:50") are NAS-local with no zone.
+_TASK_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
 
 
 # DSM sends these codes without any error payload on package endpoints;
@@ -170,6 +176,93 @@ class ProjectUpdateInfo:
     images: list[str]
 
 
+@dataclass
+class TaskInfo:
+    """A user-defined Task Scheduler task and its latest run."""
+
+    task_id: int
+    name: str
+    task_type: str
+    real_owner: str | None
+    enabled: bool
+    can_run: bool
+    next_run: datetime | None
+    last_run: datetime | None = None
+    last_exit_type: str | None = None
+    last_exit_code: int | None = None
+
+    @property
+    def runnable(self) -> bool:
+        """True when Run is supported: a scheduled task DSM lets this account run.
+
+        Triggered tasks (``event_script``, boot-up/shutdown) have no
+        ``real_owner``, which ``SYNO.Core.TaskScheduler`` ``run`` needs.
+        """
+        return self.can_run and bool(self.real_owner) and not self.task_type.startswith("event")
+
+    @property
+    def last_result(self) -> str | None:
+        """``running``, ``success``, ``failed``, or DSM's own exit type; None before any run."""
+        if self.last_exit_type is None:
+            return None
+        if self.last_exit_type == "running":
+            return "running"
+        if self.last_exit_type == "normal":
+            return "success" if self.last_exit_code == 0 else "failed"
+        return self.last_exit_type
+
+
+def _parse_task_time(value: str | None, tz: tzinfo) -> datetime | None:
+    """Parse a NAS-local Task Scheduler time; None for blanks and "bootup"-style words."""
+    if not value:
+        return None
+    for fmt in _TASK_TIME_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=tz)
+        except ValueError:
+            continue
+    return None
+
+
+def _latest_task_run(history: dict) -> dict | None:
+    """Return the newest run record from ``get_history_status_list``."""
+    runs = [r for r in history.get("data", []) or [] if isinstance(r, dict)]
+    if not runs:
+        return None
+    return max(runs, key=lambda r: int(r.get("timestamp") or 0))
+
+
+def _nas_utc_offset(run: dict) -> timezone | None:
+    """Derive the NAS's UTC offset from a run record.
+
+    Each record carries ``start_time`` in NAS-local time and ``timestamp`` as
+    epoch seconds, so their difference is the NAS's offset at that run. This
+    avoids mapping DSM's own time zone names to IANA names.
+    """
+    try:
+        local = datetime.strptime(run["start_time"], _TASK_TIME_FORMATS[0])
+        utc = datetime.fromtimestamp(int(run["timestamp"]), UTC).replace(tzinfo=None)
+    except (KeyError, TypeError, ValueError):
+        return None
+    minutes = round((local - utc).total_seconds() / 60)
+    return timezone(timedelta(minutes=minutes))
+
+
+def apply_task_run(task: TaskInfo, run: dict | None) -> None:
+    """Copy a run record from ``get_history_status_list`` onto the task."""
+    if run is None:
+        return
+    try:
+        task.last_run = datetime.fromtimestamp(int(run["timestamp"]), UTC)
+    except (KeyError, TypeError, ValueError):
+        task.last_run = None
+    task.last_exit_type = run.get("exit_type")
+    code = run.get("exit_code")
+    task.last_exit_code = (
+        int(code) if isinstance(code, int | str) and str(code).lstrip("-").isdigit() else None
+    )
+
+
 def _err_detail(err: Exception) -> str:
     """Extract a diagnosable message from any exception.
 
@@ -306,6 +399,7 @@ class SynologyClient:
         self._sysinfo = None
         self._package = None
         self._docker = None
+        self._tasks = None
 
     @property
     def configuration_url(self) -> str:
@@ -359,6 +453,8 @@ class SynologyClient:
         try:
             self._sysinfo = SysInfo(**kwargs)
             self._package = Package(**kwargs)
+            # Reuses the shared session; no second login.
+            self._tasks = TaskScheduler(**kwargs)
         except Exception as err:
             if _nas_not_ready_code(err) is not None:
                 raise SynologyConnectionError(_err_detail(err)) from err
@@ -1309,6 +1405,78 @@ class SynologyClient:
                 detail = _err_detail(err)
                 _LOGGER.warning("Security scan start failed after reconnect: %s", detail)
                 raise RuntimeError(f"Security scan start failed: {detail}") from err
+
+    def get_tasks(self, fallback_tz: tzinfo = UTC) -> list[TaskInfo]:
+        """List Task Scheduler tasks with their latest run.
+
+        ``SYNO.Core.TaskScheduler`` ``list`` returns scheduled and triggered
+        tasks alike (verified live). Next-run times are NAS-local; their zone
+        comes from any task's run history (see ``_nas_utc_offset``), else
+        ``fallback_tz``. One history call per task; a failed history only
+        blanks that task's last run.
+        """
+        records: list[dict] = []
+        while True:
+            result = self._tasks.get_task_list(sort_by="name", offset=len(records), limit=100)
+            data = result.get("data", {})
+            batch = [t for t in data.get("tasks", []) if isinstance(t, dict) and "id" in t]
+            records.extend(batch)
+            if not batch or len(records) >= int(data.get("total") or 0):
+                break
+
+        runs = {rec["id"]: self.get_task_last_run(rec["id"]) for rec in records}
+        tz = next(
+            (offset for run in runs.values() if run and (offset := _nas_utc_offset(run))),
+            fallback_tz,
+        )
+
+        tasks = []
+        for rec in records:
+            enabled = bool(rec.get("enable", False))
+            task = TaskInfo(
+                task_id=int(rec["id"]),
+                name=rec.get("name") or f"Task {rec['id']}",
+                task_type=rec.get("type", ""),
+                real_owner=rec.get("real_owner"),
+                enabled=enabled,
+                can_run=bool(rec.get("can_run", False)),
+                # DSM still reports a next time for a disabled task; it won't run.
+                next_run=_parse_task_time(rec.get("next_trigger_time"), tz) if enabled else None,
+            )
+            apply_task_run(task, runs[rec["id"]])
+            tasks.append(task)
+        return tasks
+
+    def get_task_last_run(self, task_id: int) -> dict | None:
+        """Return the newest run record for a task (best-effort, None on failure)."""
+        try:
+            return _latest_task_run(self._tasks.get_task_results(task_id))
+        except Exception as err:
+            _LOGGER.debug("Task %s run history unavailable: %s", task_id, _err_detail(err))
+            return None
+
+    def run_task(self, task_id: int, real_owner: str) -> None:
+        """Run a Task Scheduler task now, as Task Scheduler's "Run" button does.
+
+        Uses the library's ``task_run`` (``SYNO.Core.TaskScheduler`` ``run``
+        v2), verified live. The shared SID is often stale when a button is
+        pressed, so retry once on a fresh session; raise on final failure.
+        """
+        try:
+            self._tasks.task_run(task_id, real_owner)
+        except Exception as first_err:
+            _LOGGER.debug(
+                "Task %s run failed (%s), reconnecting and retrying",
+                task_id,
+                _err_detail(first_err),
+            )
+            self.reconnect()
+            try:
+                self._tasks.task_run(task_id, real_owner)
+            except Exception as err:
+                detail = _err_detail(err)
+                _LOGGER.warning("Task %s run failed after reconnect: %s", task_id, detail)
+                raise RuntimeError(f"Task {task_id} run failed: {detail}") from err
 
     def reconnect(self) -> None:
         """Re-authenticate and rebuild every API wrapper (best-effort).
