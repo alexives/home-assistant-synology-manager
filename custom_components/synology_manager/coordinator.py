@@ -28,6 +28,8 @@ class SynologyManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self.server_name = server_name
+        # Set by async_setup_entry once the NAS device is registered.
+        self.nas_device_id: str | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from all sources with per-source error isolation."""
@@ -81,6 +83,12 @@ class SynologyManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if len(failures) == len(sources):
             return None
 
+        # Without Container Manager (not installed, or still starting after a
+        # reboot) the Docker sources return empty lists; that is not evidence
+        # that any project is gone.
+        if not self.client.has_docker:
+            failures.extend(name for name in ("containers", "projects") if name not in failures)
+
         project_updates, standalone_containers = self.client.group_container_updates(
             containers, projects
         )
@@ -92,4 +100,5 @@ class SynologyManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "projects": projects,
             "project_updates": project_updates,
             "standalone_containers": standalone_containers,
+            "failed_sources": failures,
         }

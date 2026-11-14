@@ -91,6 +91,8 @@ class DsmUpdateInfo:
     latest_version: str | None
     update_available: bool
     release_notes: str | None
+    model: str | None = None
+    serial: str | None = None
 
 
 @dataclass
@@ -305,6 +307,17 @@ class SynologyClient:
         self._package = None
         self._docker = None
 
+    @property
+    def configuration_url(self) -> str:
+        """URL of the DSM web UI, for the NAS device page."""
+        scheme = "https" if self._secure else "http"
+        return f"{scheme}://{self._host}:{self._port}"
+
+    @property
+    def has_docker(self) -> bool:
+        """True when the Container Manager API connected on the last login."""
+        return self._docker is not None
+
     def _api_kwargs(self) -> dict[str, Any]:
         """Common kwargs for all synology-api constructors."""
         return {
@@ -378,12 +391,14 @@ class SynologyClient:
             "entry.cgi",
             req_param={"method": "getinfo", "version": 2},
         )
-        installed = dsm_info.get("data", {}).get("version_string", "")
+        info_data = dsm_info.get("data", {})
         return DsmUpdateInfo(
-            installed_version=installed,
+            installed_version=info_data.get("version_string", ""),
             latest_version=update.get("version", None) if available else None,
             update_available=available,
             release_notes=update.get("release_note", None),
+            model=info_data.get("model") or None,
+            serial=info_data.get("serial") or None,
         )
 
     def _get_package_status(self) -> dict[str, dict[str, Any]]:
@@ -598,15 +613,10 @@ class SynologyClient:
         if self._docker is None:
             return []
 
-        try:
-            result = self._docker.list_projects()
-        except Exception as err:
-            _LOGGER.warning(
-                "list_projects failed, no project entities this cycle: %s",
-                _err_detail(err),
-                exc_info=True,
-            )
-            return []
+        # Raise on failure so the coordinator retries on a fresh session and
+        # records the source as failed: an empty list would read as "every
+        # project was deleted" and remove the project devices.
+        result = self._docker.list_projects()
 
         projects = []
         for pid, proj in result.get("data", {}).items():

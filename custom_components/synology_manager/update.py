@@ -12,11 +12,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .actions import notify, run_action
 from .const import DOMAIN
 from .coordinator import SynologyManagerCoordinator
+from .entity import SynologyManagerEntity, project_device_info
 from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_newer
 
 # Synology's guidance for how long a DSM update (download, apply, reboot)
@@ -76,7 +76,7 @@ async def async_setup_entry(
     coordinator.async_add_listener(_async_add_new_entities)
 
 
-class SynologyDSMUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], UpdateEntity):
+class SynologyDSMUpdateEntity(SynologyManagerEntity, UpdateEntity):
     """Update entity for DSM firmware."""
 
     _attr_supported_features = UpdateEntityFeature.INSTALL | UpdateEntityFeature.RELEASE_NOTES
@@ -137,7 +137,7 @@ class SynologyDSMUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], Upd
         async_call_later(self.hass, DSM_UPGRADE_WINDOW, _refresh_after_reboot)
 
 
-class SynologyPackageUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], UpdateEntity):
+class SynologyPackageUpdateEntity(SynologyManagerEntity, UpdateEntity):
     """Update entity for a Synology package."""
 
     _attr_supported_features = UpdateEntityFeature.INSTALL | UpdateEntityFeature.RELEASE_NOTES
@@ -254,7 +254,7 @@ def _community_notice(pkg: PackageInfo) -> str:
     )
 
 
-class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], UpdateEntity):
+class SynologyProjectUpdateEntity(SynologyManagerEntity, UpdateEntity):
     """Update entity for a Docker compose project (all containers combined)."""
 
     _attr_supported_features = UpdateEntityFeature.INSTALL | UpdateEntityFeature.RELEASE_NOTES
@@ -263,6 +263,7 @@ class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         super().__init__(coordinator)
         self._project_name = project_name
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_proj_update_{project_name}"
+        self._attr_device_info = project_device_info(coordinator, project_name)
 
     def _get_project_update(self) -> ProjectUpdateInfo | None:
         for pu in self.coordinator.data.get("project_updates", []):
@@ -321,7 +322,7 @@ class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         await self.coordinator.async_request_refresh()
 
 
-class SynologyContainerUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator], UpdateEntity):
+class SynologyContainerUpdateEntity(SynologyManagerEntity, UpdateEntity):
     """Update entity for a standalone Docker container (not in a compose project)."""
 
     _attr_supported_features = UpdateEntityFeature.INSTALL | UpdateEntityFeature.RELEASE_NOTES
