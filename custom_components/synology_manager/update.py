@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
@@ -25,6 +26,14 @@ from .synology_client import ContainerInfo, PackageInfo, ProjectUpdateInfo, _is_
 DSM_UPGRADE_WINDOW = timedelta(minutes=25)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Containers can carry a compose project label that Container Manager has no
+# project for (e.g. a stack deployed by Portainer); SYNO.Docker.Project can't
+# rebuild those, so their update entity can show updates but not install them.
+UNMANAGED_PROJECT_NOTICE = (
+    "Container Manager does not manage this project (it was created outside "
+    "Container Manager), so it cannot be updated from here."
+)
 
 
 async def async_setup_entry(
@@ -270,6 +279,20 @@ class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
                 return pu
         return None
 
+    def _is_unmanaged(self) -> bool:
+        pu = self._get_project_update()
+        return pu is not None and pu.project_id is None
+
+    @property
+    def supported_features(self) -> UpdateEntityFeature:
+        if self._is_unmanaged():
+            return UpdateEntityFeature.RELEASE_NOTES
+        return self._attr_supported_features
+
+    @property
+    def release_summary(self) -> str | None:
+        return UNMANAGED_PROJECT_NOTICE if self._is_unmanaged() else None
+
     @property
     def name(self) -> str:
         pu = self._get_project_update()
@@ -302,14 +325,20 @@ class SynologyProjectUpdateEntity(CoordinatorEntity[SynologyManagerCoordinator],
         if pu is None:
             return None
         parts = []
+        # The frontend hides release_summary when release notes are supported,
+        # so the notice has to be in the notes too.
+        if pu.project_id is None:
+            parts.append(f"**{UNMANAGED_PROJECT_NOTICE}**")
         for ctr in pu.containers:
             parts.append(f"**{ctr.display_name}**: {_container_release_notes(ctr.image)}")
         return "<br>".join(parts)
 
     async def async_install(self, version: str | None, backup: bool | None, **kwargs: Any) -> None:
         pu = self._get_project_update()
-        if pu is None or pu.project_id is None:
-            return
+        if pu is None:
+            raise HomeAssistantError(f"Project {self._project_name} is no longer on the NAS")
+        if pu.project_id is None:
+            raise HomeAssistantError(UNMANAGED_PROJECT_NOTICE)
         await run_action(
             self.hass,
             self.coordinator.config_entry.entry_id,
